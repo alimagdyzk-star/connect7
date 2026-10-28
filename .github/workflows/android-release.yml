@@ -20,33 +20,50 @@ permissions:
 jobs:
   build-and-release:
     name: Build Signed APK & Create GitHub Release
-    runs-on: ubuntu-latest
+    # Pin ubuntu-24.04 explicitly (avoids ubuntu-latest migration notice & includes preinstalled Android SDK)
+    runs-on: ubuntu-24.04
 
     steps:
       - name: Checkout Repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up JDK 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
+      - name: Configure Android SDK (API 36.1 & Build Tools)
+        run: |
+          SDK_ROOT="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          echo "ANDROID_HOME=${SDK_ROOT}" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=${SDK_ROOT}" >> "$GITHUB_ENV"
+
+          # Locate sdkmanager cleanly without deprecated Node 20 actions
+          SDKMANAGER="$(find "$SDK_ROOT/cmdline-tools" -name sdkmanager -type f 2>/dev/null | sort -r | head -n 1)"
+          if [ -z "$SDKMANAGER" ]; then
+            SDKMANAGER="$(which sdkmanager || true)"
+          fi
+
+          if [ -n "$SDKMANAGER" ]; then
+            yes | "$SDKMANAGER" --licenses > /dev/null || true
+            "$SDKMANAGER" --install "platform-tools" "build-tools;36.0.0" "platforms;android-36" "platforms;android-36.1"
+          else
+            echo "Warning: sdkmanager not found in PATH; relying on preinstalled SDK packages."
+          fi
 
       - name: Setup Gradle 9.3.1
-        uses: gradle/actions/setup-gradle@v4
+        uses: gradle/actions/setup-gradle@v5
         with:
           gradle-version: '9.3.1'
 
-      - name: Generate Signing Keystore (Fallback if Secrets not configured)
+      - name: Prepare Signing Keystores
         env:
           SIGNING_KEYSTORE_BASE64: ${{ secrets.SIGNING_KEYSTORE_BASE64 }}
           STORE_PASSWORD_SECRET: ${{ secrets.STORE_PASSWORD }}
           KEY_PASSWORD_SECRET: ${{ secrets.KEY_PASSWORD }}
         run: |
-          # Generate debug.keystore required by debugConfig
+          # 1. Generate debug.keystore required by debugConfig in app/build.gradle.kts
           if [ ! -f "debug.keystore" ]; then
             keytool -genkeypair -v \
               -keystore debug.keystore \
@@ -57,12 +74,12 @@ jobs:
               -dname "CN=Android Debug,O=Android,C=US"
           fi
 
-          # Configure release signing keystore (uses GitHub Secret if provided, or generates an ephemeral release keystore)
+          # 2. Configure release signing keystore (uses GitHub Secrets if set, otherwise generates CI release keystore)
           if [ -n "$SIGNING_KEYSTORE_BASE64" ] && [ -n "$STORE_PASSWORD_SECRET" ] && [ -n "$KEY_PASSWORD_SECRET" ]; then
             echo "$SIGNING_KEYSTORE_BASE64" | base64 --decode > my-upload-key.jks
-            echo "KEYSTORE_PATH=${GITHUB_WORKSPACE}/my-upload-key.jks" >> $GITHUB_ENV
-            echo "STORE_PASSWORD=${STORE_PASSWORD_SECRET}" >> $GITHUB_ENV
-            echo "KEY_PASSWORD=${KEY_PASSWORD_SECRET}" >> $GITHUB_ENV
+            echo "KEYSTORE_PATH=${GITHUB_WORKSPACE}/my-upload-key.jks" >> "$GITHUB_ENV"
+            echo "STORE_PASSWORD=${STORE_PASSWORD_SECRET}" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=${KEY_PASSWORD_SECRET}" >> "$GITHUB_ENV"
           else
             keytool -genkeypair -v \
               -keystore my-upload-key.jks \
@@ -71,9 +88,9 @@ jobs:
               -keypass apexconnectrelease \
               -keyalg RSA -keysize 2048 -validity 10000 \
               -dname "CN=ApexConnect,OU=Mobile,O=ApexConnect,L=Cairo,S=Cairo,C=EG"
-            echo "KEYSTORE_PATH=${GITHUB_WORKSPACE}/my-upload-key.jks" >> $GITHUB_ENV
-            echo "STORE_PASSWORD=apexconnectrelease" >> $GITHUB_ENV
-            echo "KEY_PASSWORD=apexconnectrelease" >> $GITHUB_ENV
+            echo "KEYSTORE_PATH=${GITHUB_WORKSPACE}/my-upload-key.jks" >> "$GITHUB_ENV"
+            echo "STORE_PASSWORD=apexconnectrelease" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=apexconnectrelease" >> "$GITHUB_ENV"
           fi
 
       - name: Run Unit & Robolectric Tests
@@ -88,7 +105,7 @@ jobs:
           sha256sum dist/ApexConnect-release.apk dist/ApexConnect-debug.apk > dist/SHA256SUMS.txt
 
       - name: Upload APK Build Artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: ApexConnect-APKs
           path: |
@@ -96,8 +113,9 @@ jobs:
             dist/ApexConnect-debug.apk
             dist/SHA256SUMS.txt
 
-      - name: Determine Release Tag
-        id: tag_info
+      - name: Publish GitHub Release with Signed APKs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           if [[ "${{ github.ref }}" == refs/tags/* ]]; then
             TAG_NAME="${GITHUB_REF#refs/tags/}"
@@ -106,24 +124,29 @@ jobs:
           else
             TAG_NAME="v1.0.${{ github.run_number }}"
           fi
-          echo "tag=${TAG_NAME}" >> $GITHUB_OUTPUT
 
-      - name: Publish GitHub Release with APK
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ steps.tag_info.outputs.tag }}
-          name: "ApexConnect ${{ steps.tag_info.outputs.tag }}"
-          body: |
-            ## ApexConnect ${{ steps.tag_info.outputs.tag }}
-            Unified Peer-to-Peer Android application combining **KDE Connect Protocol v8** with **Remote File Browsing (`kdeconnect.vfs.*`)** and **Persistent Device Chat & Notes (`kdeconnect.space.*`)**.
+          cat <<EOF > dist/RELEASE_NOTES.md
+          ## ApexConnect ${TAG_NAME}
+          Unified Peer-to-Peer Android application combining **KDE Connect Protocol v8** with **Remote File Browsing (\`kdeconnect.vfs.*\`)** and **Persistent Device Chat & Notes (\`kdeconnect.space.*\`)**.
 
-            ### Attached Installers
-            - **`ApexConnect-release.apk`** — Signed Release APK ready to install on Android 7.0+ (API 24+).
-            - **`ApexConnect-debug.apk`** — Debug APK build.
-            - **`SHA256SUMS.txt`** — Cryptographic SHA-256 checksums for APK verification.
-          files: |
-            dist/ApexConnect-release.apk
-            dist/ApexConnect-debug.apk
-            dist/SHA256SUMS.txt
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ### Attached Installers
+          - **\`ApexConnect-release.apk\`** — Signed Release APK ready to install on Android 7.0+ (API 24+).
+          - **\`ApexConnect-debug.apk\`** — Debug APK build.
+          - **\`SHA256SUMS.txt\`** — Cryptographic SHA-256 checksums for APK verification.
+          EOF
+
+          # Create or update the GitHub Release natively via preinstalled GitHub CLI (`gh`) — zero Node.js deprecation warnings!
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" \
+              dist/ApexConnect-release.apk \
+              dist/ApexConnect-debug.apk \
+              dist/SHA256SUMS.txt \
+              --clobber
+          else
+            gh release create "$TAG_NAME" \
+              dist/ApexConnect-release.apk \
+              dist/ApexConnect-debug.apk \
+              dist/SHA256SUMS.txt \
+              --title "ApexConnect ${TAG_NAME}" \
+              --notes-file dist/RELEASE_NOTES.md
+          fi

@@ -35,7 +35,7 @@ import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.EditNote
 import androidx.compose.material.icons.filled.ErrorOutline
-import androidx.compose.material.icons.filled.NoteAdd
+import androidx.compose.material.icons.automirrored.filled.NoteAdd
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Sync
@@ -409,7 +409,7 @@ fun DeviceSpaceScreen(
                             editingNote = null
                             showNoteEditor = true
                         },
-                        icon = { Icon(Icons.Filled.NoteAdd, contentDescription = null) },
+                        icon = { Icon(Icons.AutoMirrored.Filled.NoteAdd, contentDescription = null) },
                         text = { Text(stringResource(R.string.space_new_note)) },
                         containerColor = MaterialTheme.colorScheme.primary,
                         contentColor = MaterialTheme.colorScheme.onPrimary,
@@ -465,7 +465,7 @@ private fun MessageBubbleItem(
                     val fileExists = localFile != null && localFile.exists() &&
                         message.attachmentAvailability == AttachmentAvailability.READY
 
-                    if (fileExists && localFile != null) {
+                    if (fileExists) {
                         AsyncImage(
                             model = localFile,
                             contentDescription = message.attachmentFileName ?: "Shared image",

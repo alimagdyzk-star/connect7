@@ -62,7 +62,7 @@ abstract class ApexDatabase : RoomDatabase() {
                     ApexDatabase::class.java,
                     "apex_connect_vault.db"
                 )
-                    .fallbackToDestructiveMigration()
+                    .fallbackToDestructiveMigration(true)
                     .build()
                     .also { INSTANCE = it }
             }
