@@ -1,6 +1,6 @@
 {
-  "name": "",
-  "description": "",
+  "name": "ApexConnect",
+  "description": "Peer-to-peer wireless device bridge combining KDE Connect encrypted LAN discovery, pairing, remote input, media, clipboard, ping, and battery sync with remote file browsing and persistent device chat & notes.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

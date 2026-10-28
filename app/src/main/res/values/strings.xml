@@ -1,3 +1,83 @@
 <resources>
-    <string name="app_name">My Application</string>
+    <string name="app_name">ApexConnect</string>
+    <string name="app_tagline">KDE Connect Protocol v8 • LAN Vault</string>
+
+    <!-- Navigation -->
+    <string name="nav_hub">Hub</string>
+    <string name="nav_files">Remote Files</string>
+    <string name="nav_space">Device Space</string>
+    <string name="nav_tools">Tools</string>
+
+    <!-- Devices & Pairing -->
+    <string name="section_paired_devices">Paired Devices</string>
+    <string name="section_available_devices">Discovered on LAN</string>
+    <string name="action_scan_lan">Broadcast UDP Discovery</string>
+    <string name="action_add_ip">Add by IP / Port</string>
+    <string name="action_pair">Request Pair</string>
+    <string name="action_accept_pair">Accept Pair</string>
+    <string name="action_reject_pair">Decline</string>
+    <string name="action_unpair">Unpair Device</string>
+    <string name="status_connected">TLS Encrypted • Online</string>
+    <string name="status_offline">Offline • Queuing Active</string>
+    <string name="status_unpaired">Unpaired • Discovered</string>
+    <string name="status_pair_requested">Verification Pending</string>
+    <string name="label_tls_fingerprint">SHA-256 Verification Key</string>
+    <string name="label_local_identity">This Android Node</string>
+
+    <!-- Quick Actions on Main Dashboard -->
+    <string name="quick_remote_files">Remote Files</string>
+    <string name="quick_device_space">Chat &amp; Notes</string>
+    <string name="quick_send_file">Share File</string>
+    <string name="quick_clipboard">Push Clipboard</string>
+    <string name="quick_find_device">Ring Device</string>
+    <string name="quick_touchpad">Touchpad</string>
+    <string name="quick_media">Media Control</string>
+    <string name="quick_run_cmd">Run Command</string>
+
+    <!-- Remote File Browser -->
+    <string name="files_title">Remote File Browser</string>
+    <string name="files_subtitle">Authorized SFTP / LAN VFS Directory Explorer</string>
+    <string name="files_up_parent">Parent Directory (..)</string>
+    <string name="files_refresh">Refresh Directory</string>
+    <string name="files_upload">Upload File to Folder</string>
+    <string name="files_empty_dir">This directory is empty</string>
+    <string name="files_offline_notice">Device is offline. Reconnect over LAN to browse remote directories.</string>
+    <string name="files_unpaired_notice">Pair and verify TLS fingerprint before accessing remote files.</string>
+    <string name="files_unsupported_notice">Target platform does not advertise remote filesystem browsing capability.</string>
+    <string name="files_download_saf">Save to Device…</string>
+    <string name="files_open_local">Open File</string>
+    <string name="files_cancel_transfer">Cancel</string>
+    <string name="files_permission_denied">Permission denied: Path outside authorized export root.</string>
+
+    <!-- Persistent Device Space (Chat & Notes) -->
+    <string name="space_title">Device Space</string>
+    <string name="space_tab_chat">Messages &amp; Media</string>
+    <string name="space_tab_notes">Persistent Notes</string>
+    <string name="space_composer_hint">Message paired device…</string>
+    <string name="space_send">Send</string>
+    <string name="space_attach_image">Attach Image</string>
+    <string name="space_new_note">New Note</string>
+    <string name="space_clear_history">Clear History</string>
+    <string name="space_empty_chat">Start a persistent conversation or share images across devices.</string>
+    <string name="space_empty_notes">Pin persistent notes, snippets, SSH keys, or checklists synced per device.</string>
+    <string name="space_offline_banner">Offline Mode — Outgoing messages &amp; notes are queued locally and sync automatically on reconnect.</string>
+    <string name="note_title_hint">Note title</string>
+    <string name="note_body_hint">Write persistent note content…</string>
+    <string name="note_save">Save &amp; Sync Note</string>
+    <string name="note_pin">Pin Note</string>
+    <string name="action_delete">Delete</string>
+    <string name="action_retry">Retry Sync</string>
+    <string name="action_cancel">Cancel</string>
+
+    <!-- KDE Connect Plugins & Tools -->
+    <string name="tools_title">KDE Connect Plugins</string>
+    <string name="tool_touchpad_title">Remote Touchpad &amp; Presentation</string>
+    <string name="tool_touchpad_hint">Drag to move cursor • Tap to left-click • Two-button bar below</string>
+    <string name="tool_media_title">MPRIS Media Controller</string>
+    <string name="tool_clipboard_title">Clipboard Bridge</string>
+    <string name="tool_commands_title">Remote Commands</string>
+    <string name="tool_telephony_title">Notification &amp; Ping</string>
+    <string name="btn_left_click">Left Click</string>
+    <string name="btn_right_click">Right Click</string>
+    <string name="btn_send_ping">Send Custom Ping</string>
 </resources>
