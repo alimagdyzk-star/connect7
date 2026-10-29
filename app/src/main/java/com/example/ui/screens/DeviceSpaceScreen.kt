@@ -2,10 +2,9 @@ package com.example.ui.screens
 
 import android.net.Uri
 import androidx.activity.compose.BackHandler
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -23,10 +22,14 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.AddPhotoAlternate
+import androidx.compose.material.icons.automirrored.filled.Chat
+import androidx.compose.material.icons.automirrored.filled.NoteAdd
+import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.BrokenImage
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.CloudOff
@@ -35,7 +38,6 @@ import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.DoneAll
 import androidx.compose.material.icons.filled.EditNote
 import androidx.compose.material.icons.filled.ErrorOutline
-import androidx.compose.material.icons.automirrored.filled.NoteAdd
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Sync
@@ -43,15 +45,11 @@ import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.ExtendedFloatingActionButton
-import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -65,10 +63,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -84,14 +83,17 @@ import com.example.data.local.PairState
 import com.example.data.local.PairedDeviceEntity
 import com.example.data.local.SyncStatus
 import com.example.ui.SpaceSubTab
+import com.example.ui.components.AppleGroupedSection
+import com.example.ui.components.AppleSegmentedControl
+import com.example.ui.components.AppleSquircleIcon
 import com.example.ui.components.formatByteSize
 import com.example.ui.components.formatDateAndTime
 import com.example.ui.components.formatShortTime
-import com.example.ui.theme.AmberAccent
-import com.example.ui.theme.BreezeCyan
-import com.example.ui.theme.BreezeTeal
-import com.example.ui.theme.EmeraldSuccess
-import com.example.ui.theme.RoseError
+import com.example.ui.theme.AppleBlue
+import com.example.ui.theme.AppleGreen
+import com.example.ui.theme.AppleOrange
+import com.example.ui.theme.AppleRed
+import com.example.ui.theme.AppleYellow
 import java.io.File
 
 @Composable
@@ -124,7 +126,6 @@ fun DeviceSpaceScreen(
         onBackToHub()
     }
 
-    // Zero-permission Android Photo Picker per Google Play policy
     val photoPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.PickVisualMedia()
     ) { uri: Uri? ->
@@ -135,7 +136,7 @@ fun DeviceSpaceScreen(
     }
 
     if (showNoteEditor) {
-        PersistentNoteEditorDialog(
+        AppleNoteSheetDialog(
             initialNote = editingNote,
             onDismiss = {
                 showNoteEditor = false
@@ -153,31 +154,30 @@ fun DeviceSpaceScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .widthIn(max = 760.dp)
-                .padding(horizontal = 16.dp)
+                .widthIn(max = 680.dp)
+                .padding(horizontal = 20.dp)
                 .testTag("device_space_screen")
         ) {
-            // Header & Actions
+            // Apple Messages / Notes Large Header
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 6.dp),
+                    .padding(vertical = 8.dp),
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = selectedDevice?.let { "${it.deviceName} Space" }
-                            ?: stringResource(R.string.space_title),
-                        style = MaterialTheme.typography.headlineSmall,
-                        color = MaterialTheme.colorScheme.onBackground,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
+                        text = if (activeSubTab == SpaceSubTab.CHAT_STREAM) "Messages" else "Notes",
+                        style = MaterialTheme.typography.displaySmall,
+                        color = MaterialTheme.colorScheme.onBackground
                     )
                     Text(
-                        text = "Device-isolated persistent chat, images & synced notes",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                        text = selectedDevice?.deviceName ?: stringResource(R.string.space_title),
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 
@@ -207,48 +207,42 @@ fun DeviceSpaceScreen(
                 }
             }
 
-            // Mode switcher clearly distinguishing transient/chat stream vs persistent bulletin notes
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                FilterChip(
-                    selected = activeSubTab == SpaceSubTab.CHAT_STREAM,
-                    onClick = { onSelectSubTab(SpaceSubTab.CHAT_STREAM) },
-                    label = { Text("${stringResource(R.string.space_tab_chat)} (${messages.size})") },
-                    modifier = Modifier.testTag("subtab_chat")
-                )
-                FilterChip(
-                    selected = activeSubTab == SpaceSubTab.PERSISTENT_NOTES,
-                    onClick = { onSelectSubTab(SpaceSubTab.PERSISTENT_NOTES) },
-                    label = { Text("${stringResource(R.string.space_tab_notes)} (${notes.size})") },
-                    modifier = Modifier.testTag("subtab_notes")
-                )
-            }
+            // Signature iOS Sliding Segmented Control
+            AppleSegmentedControl(
+                options = listOf(
+                    "Messages (${messages.size})",
+                    "Notes (${notes.size})"
+                ),
+                selectedIndex = if (activeSubTab == SpaceSubTab.CHAT_STREAM) 0 else 1,
+                onSelectIndex = { idx ->
+                    onSelectSubTab(if (idx == 0) SpaceSubTab.CHAT_STREAM else SpaceSubTab.PERSISTENT_NOTES)
+                },
+                testTags = listOf("subtab_chat", "subtab_notes")
+            )
 
-            // Offline Queueing Notice Banner
+            // Clean Offline Queuing Banner
             if (selectedDevice != null && !selectedDevice.isReachable && selectedDevice.pairState == PairState.PAIRED) {
-                Spacer(modifier = Modifier.height(8.dp))
+                Spacer(modifier = Modifier.height(10.dp))
                 Surface(
-                    shape = RoundedCornerShape(14.dp),
+                    shape = RoundedCornerShape(12.dp),
                     color = MaterialTheme.colorScheme.tertiaryContainer,
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("space_offline_banner")
                 ) {
                     Row(
-                        modifier = Modifier.padding(12.dp),
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 10.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Icon(
                             imageVector = Icons.Filled.CloudOff,
                             contentDescription = null,
                             tint = MaterialTheme.colorScheme.onTertiaryContainer,
-                            modifier = Modifier.size(18.dp)
+                            modifier = Modifier.size(16.dp)
                         )
-                        Spacer(modifier = Modifier.width(10.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
                         Text(
-                            text = stringResource(R.string.space_offline_banner),
+                            text = "Device offline — items are saved and will sync automatically.",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onTertiaryContainer
                         )
@@ -257,24 +251,23 @@ fun DeviceSpaceScreen(
             }
 
             if (selectedDevice != null && selectedDevice.pairState != PairState.PAIRED) {
-                Spacer(modifier = Modifier.height(16.dp))
-                Card(
-                    shape = RoundedCornerShape(18.dp),
-                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
-                    modifier = Modifier.fillMaxWidth()
-                ) {
+                Spacer(modifier = Modifier.height(18.dp))
+                AppleGroupedSection {
                     Column(
-                        modifier = Modifier.padding(20.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(24.dp),
                         horizontalAlignment = Alignment.CenterHorizontally
                     ) {
                         Text(
-                            text = "Pair with ${selectedDevice.deviceName} to unlock encrypted Device Space",
+                            text = "Pair with ${selectedDevice.deviceName} to send messages & notes",
                             style = MaterialTheme.typography.titleMedium,
                             textAlign = TextAlign.Center
                         )
-                        Spacer(modifier = Modifier.height(12.dp))
+                        Spacer(modifier = Modifier.height(14.dp))
                         Button(
                             onClick = { onRequestPair(selectedDevice.deviceId) },
+                            shape = CircleShape,
                             modifier = Modifier.testTag("space_pair_button")
                         ) {
                             Text(stringResource(R.string.action_pair))
@@ -282,25 +275,28 @@ fun DeviceSpaceScreen(
                     }
                 }
             } else if (activeSubTab == SpaceSubTab.CHAT_STREAM) {
-                // CHAT & IMAGE STREAM VIEW
+                // APPLE iMESSAGE-INSPIRED CONVERSATION STREAM
                 LazyColumn(
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f)
-                        .padding(top = 8.dp)
+                        .padding(top = 12.dp)
                         .testTag("chat_messages_list"),
                     contentPadding = PaddingValues(bottom = 12.dp),
-                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     if (messages.isEmpty()) {
                         item {
-                            EmptySpacePlaceholder(
-                                message = stringResource(R.string.space_empty_chat)
+                            AppleEmptySpaceState(
+                                icon = Icons.AutoMirrored.Filled.Chat,
+                                tint = AppleBlue,
+                                title = "No Messages Yet",
+                                subtitle = "Send text snippets, links, or photos directly to ${selectedDevice?.deviceName ?: "your peer"}."
                             )
                         }
                     } else {
                         items(messages, key = { it.messageUuid }) { msg ->
-                            MessageBubbleItem(
+                            IMessageBubble(
                                 message = msg,
                                 onOpenImage = { file, mime ->
                                     onOpenAttachment(context, file, mime)
@@ -311,86 +307,128 @@ fun DeviceSpaceScreen(
                     }
                 }
 
-                // Composer Bar
-                Surface(
-                    shape = RoundedCornerShape(22.dp),
-                    color = MaterialTheme.colorScheme.surfaceContainerHigh,
+                // Authentic iMessage Pill Composer Bar (`+` circle on left, pill input with upward blue arrow on right)
+                Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(vertical = 8.dp)
+                        .padding(vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(
+                    Surface(
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.surface,
+                        shadowElevation = 0.5.dp,
                         modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 8.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        IconButton(
-                            onClick = {
+                            .size(38.dp)
+                            .clip(CircleShape)
+                            .clickable {
                                 photoPickerLauncher.launch(
                                     PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
                                 )
-                            },
-                            modifier = Modifier.testTag("attach_image_button")
-                        ) {
+                            }
+                            .testTag("attach_image_button")
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
                             Icon(
-                                imageVector = Icons.Filled.AddPhotoAlternate,
+                                imageVector = Icons.Filled.Add,
                                 contentDescription = stringResource(R.string.space_attach_image),
-                                tint = BreezeTeal
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(22.dp)
                             )
                         }
+                    }
 
-                        OutlinedTextField(
-                            value = draftMessage,
-                            onValueChange = { draftMessage = it },
-                            placeholder = { Text(stringResource(R.string.space_composer_hint)) },
+                    Spacer(modifier = Modifier.width(8.dp))
+
+                    Surface(
+                        shape = RoundedCornerShape(22.dp),
+                        color = MaterialTheme.colorScheme.surface,
+                        shadowElevation = 0.5.dp,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Row(
                             modifier = Modifier
-                                .weight(1f)
-                                .testTag("chat_message_input"),
-                            maxLines = 4,
-                            shape = RoundedCornerShape(16.dp)
-                        )
-
-                        Spacer(modifier = Modifier.width(6.dp))
-
-                        IconButton(
-                            onClick = {
-                                if (draftMessage.isNotBlank()) {
-                                    onSendTextMessage(draftMessage)
-                                    draftMessage = ""
-                                }
-                            },
-                            enabled = draftMessage.isNotBlank(),
-                            modifier = Modifier.testTag("send_message_button")
+                                .fillMaxWidth()
+                                .padding(start = 16.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.Send,
-                                contentDescription = stringResource(R.string.space_send),
-                                tint = if (draftMessage.isNotBlank()) BreezeCyan else MaterialTheme.colorScheme.outline
-                            )
+                            Box(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(vertical = 6.dp)
+                            ) {
+                                if (draftMessage.isEmpty()) {
+                                    Text(
+                                        text = "iMessage / LAN Message",
+                                        style = MaterialTheme.typography.bodyLarge,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                BasicTextField(
+                                    value = draftMessage,
+                                    onValueChange = { draftMessage = it },
+                                    textStyle = MaterialTheme.typography.bodyLarge.copy(
+                                        color = MaterialTheme.colorScheme.onSurface
+                                    ),
+                                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                                    maxLines = 4,
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .testTag("chat_message_input")
+                                )
+                            }
+
+                            Spacer(modifier = Modifier.width(6.dp))
+
+                            val canSend = draftMessage.isNotBlank()
+                            Box(
+                                modifier = Modifier
+                                    .size(32.dp)
+                                    .clip(CircleShape)
+                                    .background(
+                                        if (canSend) AppleBlue
+                                        else MaterialTheme.colorScheme.surfaceVariant
+                                    )
+                                    .clickable(enabled = canSend) {
+                                        onSendTextMessage(draftMessage)
+                                        draftMessage = ""
+                                    }
+                                    .testTag("send_message_button"),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.ArrowUpward,
+                                    contentDescription = stringResource(R.string.space_send),
+                                    tint = if (canSend) Color.White else MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
                         }
                     }
                 }
             } else {
-                // PERSISTENT BULLETIN NOTES VIEW
+                // APPLE NOTES INSPIRED CLEAN CARDS
                 Box(modifier = Modifier.fillMaxSize()) {
                     LazyColumn(
                         modifier = Modifier
                             .fillMaxSize()
-                            .padding(top = 8.dp)
+                            .padding(top = 12.dp)
                             .testTag("persistent_notes_list"),
                         contentPadding = PaddingValues(bottom = 88.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
                         if (notes.isEmpty()) {
                             item {
-                                EmptySpacePlaceholder(
-                                    message = stringResource(R.string.space_empty_notes)
+                                AppleEmptySpaceState(
+                                    icon = Icons.Filled.EditNote,
+                                    tint = AppleOrange,
+                                    title = "No Shared Notes",
+                                    subtitle = "Create persistent notes, Wi-Fi passwords, or terminal snippets synced with this device."
                                 )
                             }
                         } else {
                             items(notes, key = { it.noteUuid }) { note ->
-                                PersistentNoteCard(
+                                AppleNoteCard(
                                     note = note,
                                     onEdit = {
                                         editingNote = note
@@ -404,20 +442,24 @@ fun DeviceSpaceScreen(
                         }
                     }
 
-                    ExtendedFloatingActionButton(
+                    FloatingActionButton(
                         onClick = {
                             editingNote = null
                             showNoteEditor = true
                         },
-                        icon = { Icon(Icons.AutoMirrored.Filled.NoteAdd, contentDescription = null) },
-                        text = { Text(stringResource(R.string.space_new_note)) },
-                        containerColor = MaterialTheme.colorScheme.primary,
-                        contentColor = MaterialTheme.colorScheme.onPrimary,
+                        shape = CircleShape,
+                        containerColor = AppleYellow,
+                        contentColor = Color(0xFF1C1C1E),
                         modifier = Modifier
                             .align(Alignment.BottomEnd)
-                            .padding(bottom = 16.dp)
+                            .padding(bottom = 18.dp)
                             .testTag("new_note_fab")
-                    )
+                    ) {
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.NoteAdd,
+                            contentDescription = stringResource(R.string.space_new_note)
+                        )
+                    }
                 }
             }
         }
@@ -425,28 +467,20 @@ fun DeviceSpaceScreen(
 }
 
 @Composable
-private fun MessageBubbleItem(
+private fun IMessageBubble(
     message: DeviceMessageEntity,
     onOpenImage: (File, String?) -> Unit,
     onDelete: () -> Unit
 ) {
     val isOutgoing = message.isOutgoing
     val bubbleShape = if (isOutgoing) {
-        RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomStart = 20.dp, bottomEnd = 4.dp)
+        RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomStart = 20.dp, bottomEnd = 5.dp)
     } else {
-        RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomStart = 4.dp, bottomEnd = 20.dp)
+        RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomStart = 5.dp, bottomEnd = 20.dp)
     }
 
-    val containerColor = if (isOutgoing) {
-        MaterialTheme.colorScheme.primaryContainer
-    } else {
-        MaterialTheme.colorScheme.surfaceContainerHigh
-    }
-    val textColor = if (isOutgoing) {
-        MaterialTheme.colorScheme.onPrimaryContainer
-    } else {
-        MaterialTheme.colorScheme.onSurface
-    }
+    val bubbleColor = if (isOutgoing) AppleBlue else MaterialTheme.colorScheme.surface
+    val contentColor = if (isOutgoing) Color.White else MaterialTheme.colorScheme.onSurface
 
     Column(
         modifier = Modifier
@@ -456,10 +490,11 @@ private fun MessageBubbleItem(
     ) {
         Surface(
             shape = bubbleShape,
-            color = containerColor,
-            modifier = Modifier.widthIn(max = 320.dp)
+            color = bubbleColor,
+            shadowElevation = if (isOutgoing) 0.dp else 0.5.dp,
+            modifier = Modifier.widthIn(max = 300.dp)
         ) {
-            Column(modifier = Modifier.padding(12.dp)) {
+            Column(modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
                 if (message.contentType == MessageContentType.IMAGE) {
                     val localFile = message.attachmentLocalPath?.let(::File)
                     val fileExists = localFile != null && localFile.exists() &&
@@ -468,26 +503,25 @@ private fun MessageBubbleItem(
                     if (fileExists) {
                         AsyncImage(
                             model = localFile,
-                            contentDescription = message.attachmentFileName ?: "Shared image",
+                            contentDescription = message.attachmentFileName ?: "Photo",
                             contentScale = ContentScale.Crop,
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .height(180.dp)
-                                .clip(RoundedCornerShape(12.dp))
+                                .height(176.dp)
+                                .clip(RoundedCornerShape(14.dp))
                                 .clickable { onOpenImage(localFile, message.attachmentMimeType) }
                         )
                         Spacer(modifier = Modifier.height(6.dp))
                         Text(
-                            text = "${message.attachmentFileName ?: "Attachment"} • ${formatByteSize(message.attachmentSizeBytes)}",
+                            text = "${message.attachmentFileName ?: "Image"} • ${formatByteSize(message.attachmentSizeBytes)}",
                             style = MaterialTheme.typography.labelSmall,
-                            color = textColor.copy(alpha = 0.75f)
+                            color = contentColor.copy(alpha = 0.8f)
                         )
                     } else {
-                        // Explicit missing/inaccessible attachment handling per spec
                         Row(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .clip(RoundedCornerShape(12.dp))
+                                .clip(RoundedCornerShape(10.dp))
                                 .background(MaterialTheme.colorScheme.errorContainer)
                                 .padding(10.dp),
                             verticalAlignment = Alignment.CenterVertically
@@ -495,11 +529,12 @@ private fun MessageBubbleItem(
                             Icon(
                                 imageVector = Icons.Filled.BrokenImage,
                                 contentDescription = null,
-                                tint = MaterialTheme.colorScheme.onErrorContainer
+                                tint = MaterialTheme.colorScheme.onErrorContainer,
+                                modifier = Modifier.size(18.dp)
                             )
                             Spacer(modifier = Modifier.width(8.dp))
                             Text(
-                                text = "Image attachment unavailable or removed from local storage.",
+                                text = "Attachment unavailable",
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onErrorContainer
                             )
@@ -514,100 +549,63 @@ private fun MessageBubbleItem(
                     Text(
                         text = message.textBody,
                         style = MaterialTheme.typography.bodyLarge,
-                        color = textColor
-                    )
-                }
-
-                Spacer(modifier = Modifier.height(6.dp))
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text(
-                            text = if (isOutgoing) "Sent • ${formatShortTime(message.createdAtEpochMs)}"
-                            else "Peer • ${formatShortTime(message.createdAtEpochMs)}",
-                            style = MaterialTheme.typography.labelSmall,
-                            color = textColor.copy(alpha = 0.72f)
-                        )
-                        Spacer(modifier = Modifier.width(6.dp))
-                        SyncStatusBadge(message.syncStatus)
-                    }
-
-                    IconButton(
-                        onClick = onDelete,
-                        modifier = Modifier
-                            .size(28.dp)
-                            .testTag("delete_msg_${message.messageUuid}")
-                    ) {
-                        Icon(
-                            imageVector = Icons.Outlined.DeleteOutline,
-                            contentDescription = stringResource(R.string.action_delete),
-                            tint = textColor.copy(alpha = 0.65f),
-                            modifier = Modifier.size(15.dp)
-                        )
-                    }
-                }
-
-                if (!message.errorReason.isNullOrBlank()) {
-                    Text(
-                        text = message.errorReason,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = RoseError
+                        color = contentColor
                     )
                 }
             }
+        }
+
+        // Subtle caption line below bubble (iMessage style delivery & timestamp)
+        Row(
+            modifier = Modifier.padding(horizontal = 4.dp, vertical = 2.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            Text(
+                text = formatShortTime(message.createdAtEpochMs),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+            AppleDeliveryLabel(message.syncStatus)
+            Text(
+                text = "Delete",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                modifier = Modifier
+                    .clickable(onClick = onDelete)
+                    .testTag("delete_msg_${message.messageUuid}")
+            )
         }
     }
 }
 
 @Composable
-private fun SyncStatusBadge(status: SyncStatus) {
-    val (icon, label, tint) = when (status) {
-        SyncStatus.QUEUED_OFFLINE -> Triple(Icons.Filled.Schedule, "Queued", AmberAccent)
-        SyncStatus.SENDING -> Triple(Icons.Filled.Sync, "Sending", BreezeCyan)
-        SyncStatus.DELIVERED -> Triple(Icons.Filled.Check, "Delivered", BreezeTeal)
-        SyncStatus.SYNCED -> Triple(Icons.Filled.DoneAll, "Synced", EmeraldSuccess)
-        SyncStatus.FAILED -> Triple(Icons.Filled.ErrorOutline, "Retry Pending", RoseError)
+private fun AppleDeliveryLabel(status: SyncStatus) {
+    val (icon, text, color) = when (status) {
+        SyncStatus.QUEUED_OFFLINE -> Triple(Icons.Filled.Schedule, "Queued", AppleOrange)
+        SyncStatus.SENDING -> Triple(Icons.Filled.Sync, "Sending…", AppleBlue)
+        SyncStatus.DELIVERED -> Triple(Icons.Filled.Check, "Delivered", MaterialTheme.colorScheme.onSurfaceVariant)
+        SyncStatus.SYNCED -> Triple(Icons.Filled.DoneAll, "Synced", AppleGreen)
+        SyncStatus.FAILED -> Triple(Icons.Filled.ErrorOutline, "Not Delivered", AppleRed)
     }
     Row(verticalAlignment = Alignment.CenterVertically) {
-        Icon(
-            imageVector = icon,
-            contentDescription = label,
-            tint = tint,
-            modifier = Modifier.size(13.dp)
-        )
+        Icon(icon, contentDescription = null, tint = color, modifier = Modifier.size(12.dp))
         Spacer(modifier = Modifier.width(3.dp))
-        Text(
-            text = label,
-            style = MaterialTheme.typography.labelSmall,
-            color = tint
-        )
+        Text(text = text, style = MaterialTheme.typography.bodySmall, color = color)
     }
 }
 
 @Composable
-private fun PersistentNoteCard(
+private fun AppleNoteCard(
     note: DeviceNoteEntity,
     onEdit: () -> Unit,
     onTogglePin: () -> Unit,
     onCopy: () -> Unit,
     onDelete: () -> Unit
 ) {
-    Card(
-        shape = RoundedCornerShape(18.dp),
-        colors = CardDefaults.cardColors(
-            containerColor = if (note.isPinned) {
-                MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.55f)
-            } else {
-                MaterialTheme.colorScheme.surfaceContainer
-            }
-        ),
+    AppleGroupedSection(
         modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(18.dp))
+            .clip(RoundedCornerShape(16.dp))
             .clickable(onClick = onEdit)
             .testTag("note_card_${note.noteUuid}")
     ) {
@@ -625,7 +623,7 @@ private fun PersistentNoteCard(
                         Icon(
                             imageVector = Icons.Filled.PushPin,
                             contentDescription = "Pinned",
-                            tint = BreezeTeal,
+                            tint = AppleOrange,
                             modifier = Modifier.size(16.dp)
                         )
                         Spacer(modifier = Modifier.width(6.dp))
@@ -633,7 +631,7 @@ private fun PersistentNoteCard(
                     Text(
                         text = note.title,
                         style = MaterialTheme.typography.titleMedium,
-                        fontWeight = FontWeight.Bold,
+                        fontWeight = FontWeight.SemiBold,
                         color = MaterialTheme.colorScheme.onSurface,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
@@ -641,28 +639,32 @@ private fun PersistentNoteCard(
                 }
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    IconButton(onClick = onTogglePin) {
+                    IconButton(onClick = onTogglePin, modifier = Modifier.size(32.dp)) {
                         Icon(
                             imageVector = if (note.isPinned) Icons.Filled.PushPin else Icons.Outlined.PushPin,
                             contentDescription = stringResource(R.string.note_pin),
-                            modifier = Modifier.size(18.dp)
+                            tint = if (note.isPinned) AppleOrange else MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(17.dp)
                         )
                     }
-                    IconButton(onClick = onCopy) {
+                    IconButton(onClick = onCopy, modifier = Modifier.size(32.dp)) {
                         Icon(
                             imageVector = Icons.Filled.ContentCopy,
-                            contentDescription = "Copy note",
-                            modifier = Modifier.size(18.dp)
+                            contentDescription = "Copy",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(17.dp)
                         )
                     }
                     IconButton(
                         onClick = onDelete,
-                        modifier = Modifier.testTag("delete_note_${note.noteUuid}")
+                        modifier = Modifier
+                            .size(32.dp)
+                            .testTag("delete_note_${note.noteUuid}")
                     ) {
                         Icon(
                             imageVector = Icons.Outlined.DeleteOutline,
                             contentDescription = stringResource(R.string.action_delete),
-                            tint = MaterialTheme.colorScheme.error,
+                            tint = AppleRed,
                             modifier = Modifier.size(18.dp)
                         )
                     }
@@ -686,18 +688,18 @@ private fun PersistentNoteCard(
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 Text(
-                    text = "Rev ${note.revision} • Updated ${formatDateAndTime(note.updatedAtEpochMs)}",
-                    style = MaterialTheme.typography.labelSmall,
+                    text = formatDateAndTime(note.updatedAtEpochMs),
+                    style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                SyncStatusBadge(note.syncStatus)
+                AppleDeliveryLabel(note.syncStatus)
             }
         }
     }
 }
 
 @Composable
-private fun PersistentNoteEditorDialog(
+private fun AppleNoteSheetDialog(
     initialNote: DeviceNoteEntity?,
     onDismiss: () -> Unit,
     onSave: (String?, String, String, Boolean) -> Unit
@@ -708,20 +710,15 @@ private fun PersistentNoteEditorDialog(
 
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.Filled.EditNote, contentDescription = null, tint = BreezeTeal)
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(if (initialNote == null) "New Persistent Note" else "Edit Shared Note")
-            }
-        },
+        title = { Text(if (initialNote == null) "New Shared Note" else "Edit Note") },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
                 OutlinedTextField(
                     value = title,
                     onValueChange = { title = it },
-                    label = { Text(stringResource(R.string.note_title_hint)) },
+                    placeholder = { Text(stringResource(R.string.note_title_hint)) },
                     singleLine = true,
+                    shape = RoundedCornerShape(12.dp),
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("note_title_input")
@@ -729,9 +726,10 @@ private fun PersistentNoteEditorDialog(
                 OutlinedTextField(
                     value = content,
                     onValueChange = { content = it },
-                    label = { Text(stringResource(R.string.note_body_hint)) },
+                    placeholder = { Text(stringResource(R.string.note_body_hint)) },
                     minLines = 4,
                     maxLines = 8,
+                    shape = RoundedCornerShape(12.dp),
                     modifier = Modifier
                         .fillMaxWidth()
                         .testTag("note_content_input")
@@ -741,7 +739,7 @@ private fun PersistentNoteEditorDialog(
                     modifier = Modifier.clickable { isPinned = !isPinned }
                 ) {
                     Checkbox(checked = isPinned, onCheckedChange = { isPinned = it })
-                    Text("Pin to top of Device Space")
+                    Text("Pin Note")
                 }
             }
         },
@@ -749,13 +747,14 @@ private fun PersistentNoteEditorDialog(
             Button(
                 onClick = { onSave(initialNote?.noteUuid, title, content, isPinned) },
                 enabled = title.isNotBlank() || content.isNotBlank(),
+                shape = CircleShape,
                 modifier = Modifier.testTag("save_note_confirm_button")
             ) {
-                Text(stringResource(R.string.note_save))
+                Text("Save")
             }
         },
         dismissButton = {
-            OutlinedButton(onClick = onDismiss) {
+            TextButton(onClick = onDismiss) {
                 Text(stringResource(R.string.action_cancel))
             }
         }
@@ -763,28 +762,33 @@ private fun PersistentNoteEditorDialog(
 }
 
 @Composable
-private fun EmptySpacePlaceholder(message: String) {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 32.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Image(
-            painter = painterResource(id = R.drawable.img_empty_vault),
-            contentDescription = null,
-            contentScale = ContentScale.Crop,
+private fun AppleEmptySpaceState(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    tint: Color,
+    title: String,
+    subtitle: String
+) {
+    AppleGroupedSection(modifier = Modifier.padding(top = 12.dp)) {
+        Column(
             modifier = Modifier
-                .size(144.dp)
-                .clip(RoundedCornerShape(22.dp))
-        )
-        Spacer(modifier = Modifier.height(14.dp))
-        Text(
-            text = message,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.padding(horizontal = 24.dp)
-        )
+                .fillMaxWidth()
+                .padding(vertical = 36.dp, horizontal = 24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            AppleSquircleIcon(icon = icon, tintColor = tint, sizeDp = 48)
+            Spacer(modifier = Modifier.height(14.dp))
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = subtitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+        }
     }
 }

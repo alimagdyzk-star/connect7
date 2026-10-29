@@ -1,6 +1,11 @@
 package com.example
 
 import android.content.Context
+import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.onNodeWithTag
+import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performTextInput
 import androidx.test.core.app.ApplicationProvider
 import com.example.core.network.LanLinkEngine
 import com.example.core.protocol.NetworkPacket
@@ -20,6 +25,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertTrue
 import org.junit.Before
+import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
@@ -29,6 +35,9 @@ import java.io.ByteArrayOutputStream
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36])
 class ExampleRobolectricTest {
+
+    @get:Rule
+    val composeRule = createAndroidComposeRule<MainActivity>()
 
     private lateinit var context: Context
     private lateinit var database: ApexDatabase
@@ -55,6 +64,40 @@ class ExampleRobolectricTest {
     }
 
     @Test
+    fun `apple redesigned UI navigates cleanly across Devices, Browse Files, Space Messages & Notes, and Controls`() {
+        composeRule.waitForIdle()
+
+        // 1. Verify clean Hub screen renders with Active Device capsule & Continuity Workspace cards
+        composeRule.onNodeWithTag("active_device_capsule").assertIsDisplayed()
+        composeRule.onNodeWithTag("spotlight_remote_files_card").assertIsDisplayed()
+        composeRule.onNodeWithTag("spotlight_device_space_card").assertIsDisplayed()
+
+        // 2. Navigate to Apple Files-style Remote Browser via Spotlight card
+        composeRule.onNodeWithTag("spotlight_remote_files_card").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("remote_files_screen").assertIsDisplayed()
+
+        // 3. Navigate to iMessage & Apple Notes Space tab, send a message, and switch to Notes segment
+        composeRule.onNodeWithTag("nav_tab_space").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("device_space_screen").assertIsDisplayed()
+        composeRule.onNodeWithTag("chat_message_input").performTextInput("Hello from Apple UI test")
+        composeRule.onNodeWithTag("send_message_button").performClick()
+        composeRule.waitForIdle()
+
+        // Switch segmented control to Notes
+        composeRule.onNodeWithTag("subtab_notes").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("new_note_fab").assertIsDisplayed()
+
+        // 4. Navigate to Control Center / Trackpad tab
+        composeRule.onNodeWithTag("nav_tab_tools").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("plugins_tools_screen").assertIsDisplayed()
+        composeRule.onNodeWithTag("remote_touchpad_surface").assertIsDisplayed()
+    }
+
+    @Test
     fun `NetworkPacket round-trip serialization preserves v8 fields and payloadTransferInfo`() {
         val original = NetworkPacket(
             id = 1700000123L,
@@ -75,7 +118,6 @@ class ExampleRobolectricTest {
 
     @Test
     fun `remote file browser enforces pairing, capability checks, directory listing, and verified download`() = runBlocking {
-        // Wait briefly for local TCP responder to bind
         delay(150)
 
         val pairedWs = PairedDeviceEntity(
@@ -94,11 +136,9 @@ class ExampleRobolectricTest {
         )
         database.deviceDao().upsertDevice(pairedWs)
 
-        // 1. Unpaired device must be rejected
         val unpairedBrowse = repository.listRemoteDirectory(pairedWs.deviceId, "/")
         assertTrue(unpairedBrowse.isFailure)
 
-        // 2. Pair device and list root directory over real loopback TCP socket
         database.deviceDao().updatePairState(pairedWs.deviceId, PairState.PAIRED)
         val rootListing = repository.listRemoteDirectory(pairedWs.deviceId, "/")
         assertTrue("Expected root listing to succeed: ${rootListing.exceptionOrNull()}", rootListing.isSuccess)
@@ -108,7 +148,6 @@ class ExampleRobolectricTest {
         val readmeEntry = entries.firstOrNull { it.name == "KDE_Connect_SFTP_Export.md" }
         assertNotNull(readmeEntry)
 
-        // 3. Stream download with SHA-256 verification
         val memOut = ByteArrayOutputStream()
         val shaResult = repository.lanEngine.streamRemoteFileDownload(
             ipAddress = "127.0.0.1",
@@ -120,7 +159,6 @@ class ExampleRobolectricTest {
         assertTrue(shaResult.isSuccess)
         assertTrue(memOut.toString(Charsets.UTF_8.name()).contains("KDE Connect v8 Authorized Export Root"))
 
-        // 4. Platform without SFTP/VFS support reports UnsupportedOperationException explicitly
         val tvPeer = pairedWs.copy(
             deviceId = "tv_no_fs",
             pairState = PairState.PAIRED,
@@ -151,7 +189,6 @@ class ExampleRobolectricTest {
         val secondPeer = offlinePeer.copy(deviceId = "peer_beta", deviceName = "Second Phone")
         database.deviceDao().upsertDevices(listOf(offlinePeer, secondPeer))
 
-        // 1. Send message while offline -> queued locally & isolated to peer_alpha
         repository.sendTextMessage("peer_alpha", "Queued while offline")
         val alphaMsgs = repository.observeMessages("peer_alpha").first()
         val betaMsgs = repository.observeMessages("peer_beta").first()
@@ -159,12 +196,10 @@ class ExampleRobolectricTest {
         assertEquals(SyncStatus.QUEUED_OFFLINE, alphaMsgs.first().syncStatus)
         assertTrue(betaMsgs.isEmpty())
 
-        // 2. Reconnect peer_alpha -> queued message synchronizes over TCP and transitions to SYNCED
         repository.toggleDeviceReachability("peer_alpha")
         val syncedMsgs = repository.observeMessages("peer_alpha").first()
         assertEquals(SyncStatus.SYNCED, syncedMsgs.first().syncStatus)
 
-        // 3. Duplicate incoming packet with identical UUID is ignored idempotently
         val incomingPkt = NetworkPacket(
             type = NetworkPacket.TYPE_SPACE_MESSAGE,
             body = JSONObject().apply {
@@ -180,7 +215,6 @@ class ExampleRobolectricTest {
         val afterDup = repository.observeMessages("peer_alpha").first()
         assertEquals(2, afterDup.size)
 
-        // 4. Persistent Note Last-Write-Wins conflict resolution
         val olderNote = NetworkPacket(
             type = NetworkPacket.TYPE_SPACE_NOTE,
             body = JSONObject().apply {
@@ -206,7 +240,6 @@ class ExampleRobolectricTest {
             }
         )
         repository.handleIncomingPacketFromPeer("peer_alpha", newerNote, null)
-        // Out-of-order stale packet arrives later -> must NOT overwrite newer revision
         repository.handleIncomingPacketFromPeer("peer_alpha", olderNote, null)
 
         val notes = repository.observeNotes("peer_alpha").first()

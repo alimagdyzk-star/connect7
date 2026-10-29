@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.material.icons.Icons
@@ -21,10 +22,12 @@ import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.outlined.Devices
 import androidx.compose.material.icons.outlined.Folder
 import androidx.compose.material.icons.outlined.Tune
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
+import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.NavigationRail
 import androidx.compose.material3.NavigationRailItem
 import androidx.compose.material3.Scaffold
@@ -36,6 +39,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
@@ -67,7 +71,7 @@ class MainActivity : ComponentActivity() {
 
 private data class NavTabSpec(
     val destination: ApexDestination,
-    val labelRes: Int,
+    val label: String,
     val selectedIcon: ImageVector,
     val unselectedIcon: ImageVector,
     val testTag: String
@@ -98,28 +102,28 @@ fun ApexConnectApp(viewModel: ApexViewModel) {
         listOf(
             NavTabSpec(
                 destination = ApexDestination.HUB,
-                labelRes = R.string.nav_hub,
+                label = "Devices",
                 selectedIcon = Icons.Filled.Devices,
                 unselectedIcon = Icons.Outlined.Devices,
                 testTag = "nav_tab_hub"
             ),
             NavTabSpec(
                 destination = ApexDestination.REMOTE_FILES,
-                labelRes = R.string.nav_files,
+                label = "Files",
                 selectedIcon = Icons.Filled.Folder,
                 unselectedIcon = Icons.Outlined.Folder,
                 testTag = "nav_tab_files"
             ),
             NavTabSpec(
                 destination = ApexDestination.DEVICE_SPACE,
-                labelRes = R.string.nav_space,
+                label = "Space",
                 selectedIcon = Icons.AutoMirrored.Filled.Chat,
                 unselectedIcon = Icons.AutoMirrored.Outlined.Chat,
                 testTag = "nav_tab_space"
             ),
             NavTabSpec(
                 destination = ApexDestination.PLUGINS_TOOLS,
-                labelRes = R.string.nav_tools,
+                label = "Controls",
                 selectedIcon = Icons.Filled.Tune,
                 unselectedIcon = Icons.Outlined.Tune,
                 testTag = "nav_tab_tools"
@@ -137,23 +141,43 @@ fun ApexConnectApp(viewModel: ApexViewModel) {
             snackbarHost = { SnackbarHost(snackbarHostState) },
             bottomBar = {
                 if (!useNavigationRail) {
-                    NavigationBar(
-                        containerColor = MaterialTheme.colorScheme.surfaceContainer
-                    ) {
-                        navTabs.forEach { tab ->
-                            val selected = uiState.currentTab == tab.destination
-                            NavigationBarItem(
-                                selected = selected,
-                                onClick = { viewModel.selectTab(tab.destination) },
-                                icon = {
-                                    Icon(
-                                        imageVector = if (selected) tab.selectedIcon else tab.unselectedIcon,
-                                        contentDescription = stringResource(tab.labelRes)
-                                    )
-                                },
-                                label = { Text(stringResource(tab.labelRes)) },
-                                modifier = Modifier.testTag(tab.testTag)
-                            )
+                    Column(modifier = Modifier.fillMaxWidth()) {
+                        HorizontalDivider(
+                            thickness = 0.5.dp,
+                            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f)
+                        )
+                        // Clean iOS TabBar aesthetic: crisp surface, no heavy oval indicator, pure Apple Blue active tint
+                        NavigationBar(
+                            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f),
+                            tonalElevation = 0.dp
+                        ) {
+                            navTabs.forEach { tab ->
+                                val selected = uiState.currentTab == tab.destination
+                                NavigationBarItem(
+                                    selected = selected,
+                                    onClick = { viewModel.selectTab(tab.destination) },
+                                    icon = {
+                                        Icon(
+                                            imageVector = if (selected) tab.selectedIcon else tab.unselectedIcon,
+                                            contentDescription = tab.label
+                                        )
+                                    },
+                                    label = {
+                                        Text(
+                                            text = tab.label,
+                                            style = MaterialTheme.typography.labelMedium
+                                        )
+                                    },
+                                    colors = NavigationBarItemDefaults.colors(
+                                        selectedIconColor = MaterialTheme.colorScheme.primary,
+                                        selectedTextColor = MaterialTheme.colorScheme.primary,
+                                        unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        indicatorColor = Color.Transparent
+                                    ),
+                                    modifier = Modifier.testTag(tab.testTag)
+                                )
+                            }
                         }
                     }
                 }
@@ -167,7 +191,7 @@ fun ApexConnectApp(viewModel: ApexViewModel) {
                 if (useNavigationRail) {
                     NavigationRail(
                         modifier = Modifier.fillMaxHeight(),
-                        containerColor = MaterialTheme.colorScheme.surfaceContainer
+                        containerColor = MaterialTheme.colorScheme.surface
                     ) {
                         navTabs.forEach { tab ->
                             val selected = uiState.currentTab == tab.destination
@@ -177,10 +201,10 @@ fun ApexConnectApp(viewModel: ApexViewModel) {
                                 icon = {
                                     Icon(
                                         imageVector = if (selected) tab.selectedIcon else tab.unselectedIcon,
-                                        contentDescription = stringResource(tab.labelRes)
+                                        contentDescription = tab.label
                                     )
                                 },
-                                label = { Text(stringResource(tab.labelRes)) },
+                                label = { Text(tab.label) },
                                 modifier = Modifier.testTag(tab.testTag)
                             )
                         }
@@ -188,7 +212,7 @@ fun ApexConnectApp(viewModel: ApexViewModel) {
                 }
 
                 Column(modifier = Modifier.fillMaxSize()) {
-                    // Persistent top device selector & reachability bar across all screens
+                    // Compact Dynamic-Island-inspired top device switcher capsule
                     ActiveDeviceSelectorStrip(
                         devices = devices,
                         selectedDeviceId = uiState.selectedDeviceId,
@@ -196,7 +220,7 @@ fun ApexConnectApp(viewModel: ApexViewModel) {
                         onToggleReachability = { id -> viewModel.togglePeerReachability(id) }
                     )
 
-                    // Real-time file transfer progress & cancel banner
+                    // AirDrop-style transfer progress platter
                     ActiveTransferBanner(
                         progress = activeTransfer,
                         onCancel = { viewModel.cancelActiveTransfer() }

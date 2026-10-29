@@ -2,25 +2,38 @@ package com.example.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-// KDE Breeze Dark + Modern Slate & Cyan Palette
-val Slate950 = Color(0xFF090E1A)
-val Slate900 = Color(0xFF0F172A)
-val Slate800 = Color(0xFF1E293B)
-val Slate700 = Color(0xFF334155)
-val Slate600 = Color(0xFF475569)
-val Slate400 = Color(0xFF94A3B8)
-val Slate200 = Color(0xFFE2E8F0)
-val Slate50 = Color(0xFFF8FAFC)
+// Apple Human Interface Guidelines (iOS 18 / macOS Sequoia) System Colors
 
-val BreezeCyan = Color(0xFF38BDF8)
-val BreezeCyanDark = Color(0xFF0284C7)
-val BreezeCyanContainer = Color(0xFF0C4A6E)
-val BreezeTeal = Color(0xFF2DD4BF)
-val BreezeTealDark = Color(0xFF0D9488)
-val BreezeTealContainer = Color(0xFF134E4A)
+// Light Mode Grouped Surfaces & Backgrounds
+val AppleGroupedBgLight = Color(0xFFF2F2F7)      // systemGroupedBackground
+val AppleSecondaryBgLight = Color(0xFFFFFFFF)    // secondarySystemGroupedBackground (pure white cards)
+val AppleTertiaryBgLight = Color(0xFFE5E5EA)     // tertiarySystemFill / segmented track
+val AppleLabelPrimaryLight = Color(0xFF1C1C1E)
+val AppleLabelSecondaryLight = Color(0xFF8E8E93)
+val AppleSeparatorLight = Color(0xFFD1D1D6)
 
-val AmberAccent = Color(0xFFFBBF24)
-val AmberContainer = Color(0xFF78350F)
-val EmeraldSuccess = Color(0xFF34D399)
-val RoseError = Color(0xFFFB7185)
-val RoseErrorContainer = Color(0xFF881337)
+// Dark Mode Elevated Grouped Surfaces
+val AppleGroupedBgDark = Color(0xFF000000)       // pure OLED black grouped background
+val AppleSecondaryBgDark = Color(0xFF1C1C1E)     // elevated card surface
+val AppleTertiaryBgDark = Color(0xFF2C2C2E)      // secondary elevated / pill track
+val AppleLabelPrimaryDark = Color(0xFFFFFFFF)
+val AppleLabelSecondaryDark = Color(0xFF8E8E93)
+val AppleSeparatorDark = Color(0xFF38383A)
+
+// Signature Apple System Tints
+val AppleBlue = Color(0xFF007AFF)
+val AppleBlueDark = Color(0xFF0A84FF)
+val AppleGreen = Color(0xFF34C759)
+val AppleIndigo = Color(0xFF5856D6)
+val AppleOrange = Color(0xFFFF9500)
+val ApplePink = Color(0xFFFF2D55)
+val AppleRed = Color(0xFFFF3B30)
+val AppleTeal = Color(0xFF30B0C7)
+val AppleYellow = Color(0xFFFFCC00)
+
+// Backward-compatible semantic aliases used across screens
+val BreezeCyan = AppleBlue
+val BreezeTeal = AppleTeal
+val AmberAccent = AppleOrange
+val EmeraldSuccess = AppleGreen
+val RoseError = AppleRed

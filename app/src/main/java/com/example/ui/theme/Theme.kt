@@ -10,83 +10,85 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.unit.dp
 
-private val ApexDarkColorScheme = darkColorScheme(
-    primary = BreezeCyan,
-    onPrimary = Slate950,
-    primaryContainer = BreezeCyanContainer,
-    onPrimaryContainer = Color(0xFFE0F2FE),
-    secondary = BreezeTeal,
-    onSecondary = Slate950,
-    secondaryContainer = BreezeTealContainer,
-    onSecondaryContainer = Color(0xFFCCFBF1),
-    tertiary = AmberAccent,
-    onTertiary = Slate950,
-    tertiaryContainer = AmberContainer,
-    onTertiaryContainer = Color(0xFFFEF3C7),
-    background = Slate950,
-    onBackground = Slate50,
-    surface = Slate900,
-    onSurface = Slate50,
-    surfaceVariant = Slate800,
-    onSurfaceVariant = Slate400,
-    surfaceContainerLowest = Color(0xFF060A13),
-    surfaceContainerLow = Color(0xFF0D1424),
-    surfaceContainer = Slate900,
-    surfaceContainerHigh = Slate800,
-    surfaceContainerHighest = Slate700,
-    outline = Slate600,
-    outlineVariant = Slate700,
-    error = RoseError,
-    onError = Slate950,
-    errorContainer = RoseErrorContainer,
-    onErrorContainer = Color(0xFFFFE4E6)
-)
-
-private val ApexLightColorScheme = lightColorScheme(
-    primary = BreezeCyanDark,
+private val AppleLightColorScheme = lightColorScheme(
+    primary = AppleBlue,
     onPrimary = Color.White,
-    primaryContainer = Color(0xFFE0F2FE),
-    onPrimaryContainer = Color(0xFF075985),
-    secondary = BreezeTealDark,
+    primaryContainer = Color(0xFFE5F1FF),
+    onPrimaryContainer = Color(0xFF0040DD),
+    secondary = AppleIndigo,
     onSecondary = Color.White,
-    secondaryContainer = Color(0xFFCCFBF1),
-    onSecondaryContainer = Color(0xFF115E59),
-    tertiary = Color(0xFFD97706),
+    secondaryContainer = Color(0xFFEEEEFF),
+    onSecondaryContainer = Color(0xFF3634A3),
+    tertiary = AppleOrange,
     onTertiary = Color.White,
-    tertiaryContainer = Color(0xFFFEF3C7),
-    onTertiaryContainer = Color(0xFF78350F),
-    background = Slate50,
-    onBackground = Slate900,
-    surface = Color.White,
-    onSurface = Slate900,
-    surfaceVariant = Slate200,
-    onSurfaceVariant = Slate600,
-    outline = Slate400,
-    outlineVariant = Slate200,
-    error = Color(0xFFE11D48),
+    tertiaryContainer = Color(0xFFFFF4E5),
+    onTertiaryContainer = Color(0xFF995700),
+    background = AppleGroupedBgLight,
+    onBackground = AppleLabelPrimaryLight,
+    surface = AppleSecondaryBgLight,
+    onSurface = AppleLabelPrimaryLight,
+    surfaceVariant = AppleTertiaryBgLight,
+    onSurfaceVariant = AppleLabelSecondaryLight,
+    surfaceContainerLowest = Color.White,
+    surfaceContainerLow = Color(0xFFF9F9FB),
+    surfaceContainer = AppleSecondaryBgLight,
+    surfaceContainerHigh = Color(0xFFEBEBF0),
+    surfaceContainerHighest = AppleTertiaryBgLight,
+    outline = AppleLabelSecondaryLight,
+    outlineVariant = AppleSeparatorLight,
+    error = AppleRed,
     onError = Color.White,
-    errorContainer = Color(0xFFFFE4E6),
-    onErrorContainer = Color(0xFF881337)
+    errorContainer = Color(0xFFFFEBEA),
+    onErrorContainer = Color(0xFF990900)
 )
 
+private val AppleDarkColorScheme = darkColorScheme(
+    primary = AppleBlueDark,
+    onPrimary = Color.White,
+    primaryContainer = Color(0xFF0A2A4A),
+    onPrimaryContainer = Color(0xFF84C2FF),
+    secondary = Color(0xFF5E5CE6),
+    onSecondary = Color.White,
+    secondaryContainer = Color(0xFF24234D),
+    onSecondaryContainer = Color(0xFFC7C6FF),
+    tertiary = Color(0xFFFF9F0A),
+    onTertiary = Color.Black,
+    tertiaryContainer = Color(0xFF3D2800),
+    onTertiaryContainer = Color(0xFFFFD48A),
+    background = AppleGroupedBgDark,
+    onBackground = AppleLabelPrimaryDark,
+    surface = AppleSecondaryBgDark,
+    onSurface = AppleLabelPrimaryDark,
+    surfaceVariant = AppleTertiaryBgDark,
+    onSurfaceVariant = AppleLabelSecondaryDark,
+    surfaceContainerLowest = Color(0xFF0D0D0F),
+    surfaceContainerLow = AppleSecondaryBgDark,
+    surfaceContainer = AppleSecondaryBgDark,
+    surfaceContainerHigh = AppleTertiaryBgDark,
+    surfaceContainerHighest = Color(0xFF3A3A3C),
+    outline = AppleLabelSecondaryDark,
+    outlineVariant = AppleSeparatorDark,
+    error = Color(0xFFFF453A),
+    onError = Color.White,
+    errorContainer = Color(0xFF421111),
+    onErrorContainer = Color(0xFFFFB3AE)
+)
+
+// Apple Continuous Squircle-inspired Radii
 val ApexShapes = Shapes(
     extraSmall = RoundedCornerShape(8.dp),
-    small = RoundedCornerShape(12.dp),
-    medium = RoundedCornerShape(16.dp),
-    large = RoundedCornerShape(22.dp),
-    extraLarge = RoundedCornerShape(28.dp)
+    small = RoundedCornerShape(10.dp),
+    medium = RoundedCornerShape(14.dp),
+    large = RoundedCornerShape(18.dp),
+    extraLarge = RoundedCornerShape(24.dp)
 )
 
 @Composable
 fun MyApplicationTheme(
-    darkTheme: Boolean = true, // Default to signature KDE Breeze Midnight Dark aesthetic
+    darkTheme: Boolean = isSystemInDarkTheme(),
     content: @Composable () -> Unit
 ) {
-    val colorScheme = if (darkTheme || isSystemInDarkTheme()) {
-        ApexDarkColorScheme
-    } else {
-        ApexLightColorScheme
-    }
+    val colorScheme = if (darkTheme) AppleDarkColorScheme else AppleLightColorScheme
 
     MaterialTheme(
         colorScheme = colorScheme,

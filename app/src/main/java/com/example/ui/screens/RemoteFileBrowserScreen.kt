@@ -4,8 +4,6 @@ import android.net.Uri
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.Image
-import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -22,28 +20,26 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
-import androidx.compose.material.icons.automirrored.filled.OpenInNew
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Code
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.FolderOpen
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -58,11 +54,11 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -72,11 +68,18 @@ import com.example.data.local.PairState
 import com.example.data.local.PairedDeviceEntity
 import com.example.data.local.TransferRecordEntity
 import com.example.ui.RemoteDirectoryState
+import com.example.ui.components.AppleGroupedRow
+import com.example.ui.components.AppleGroupedSection
+import com.example.ui.components.AppleInsetDivider
+import com.example.ui.components.AppleSectionHeader
+import com.example.ui.components.AppleSquircleIcon
 import com.example.ui.components.formatByteSize
 import com.example.ui.components.formatDateAndTime
-import com.example.ui.theme.BreezeCyan
-import com.example.ui.theme.BreezeTeal
-import com.example.ui.theme.EmeraldSuccess
+import com.example.ui.theme.AppleBlue
+import com.example.ui.theme.AppleGreen
+import com.example.ui.theme.AppleIndigo
+import com.example.ui.theme.AppleOrange
+import com.example.ui.theme.AppleTeal
 
 @Composable
 fun RemoteFileBrowserScreen(
@@ -97,7 +100,6 @@ fun RemoteFileBrowserScreen(
     val context = LocalContext.current
     var pendingDownloadEntry by remember { mutableStateOf<RemoteFileEntry?>(null) }
 
-    // System back button navigates up parent directory first, then returns to Hub
     BackHandler {
         if (currentPath != "/" && currentPath.isNotBlank()) {
             onNavigateUp()
@@ -106,7 +108,6 @@ fun RemoteFileBrowserScreen(
         }
     }
 
-    // SAF CreateDocument launcher for saving remote files to user-selected storage
     val safDownloadLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.CreateDocument("*/*")
     ) { destinationUri: Uri? ->
@@ -117,7 +118,6 @@ fun RemoteFileBrowserScreen(
         pendingDownloadEntry = null
     }
 
-    // SAF OpenDocument launcher for uploading local files into the active remote folder
     val uploadPickerLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { sourceUri: Uri? ->
@@ -130,11 +130,11 @@ fun RemoteFileBrowserScreen(
         Column(
             modifier = Modifier
                 .fillMaxSize()
-                .widthIn(max = 760.dp)
-                .padding(horizontal = 16.dp)
+                .widthIn(max = 680.dp)
+                .padding(horizontal = 20.dp)
                 .testTag("remote_files_screen")
         ) {
-            // Header & Actions Row
+            // Apple Files Style Large Header
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
@@ -144,75 +144,102 @@ fun RemoteFileBrowserScreen(
             ) {
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = stringResource(R.string.files_title),
-                        style = MaterialTheme.typography.headlineSmall,
+                        text = "Browse",
+                        style = MaterialTheme.typography.displaySmall,
                         color = MaterialTheme.colorScheme.onBackground
                     )
                     Text(
-                        text = selectedDevice?.let { "${it.deviceName} • ${it.platformOs}" }
-                            ?: stringResource(R.string.files_subtitle),
-                        style = MaterialTheme.typography.bodySmall,
+                        text = selectedDevice?.deviceName ?: stringResource(R.string.files_subtitle),
+                        style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis
                     )
                 }
 
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    IconButton(
-                        onClick = onRefresh,
-                        modifier = Modifier.testTag("refresh_remote_dir_button")
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Surface(
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.surface,
+                        shadowElevation = 0.5.dp,
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
+                            .clickable(onClick = onRefresh)
+                            .testTag("refresh_remote_dir_button")
                     ) {
-                        Icon(
-                            imageVector = Icons.Filled.Refresh,
-                            contentDescription = stringResource(R.string.files_refresh)
-                        )
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Filled.Refresh,
+                                contentDescription = stringResource(R.string.files_refresh),
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(19.dp)
+                            )
+                        }
                     }
 
                     if (selectedDevice?.pairState == PairState.PAIRED &&
                         selectedDevice.isReachable &&
                         selectedDevice.supportsUploadFs
                     ) {
-                        FilledTonalButton(
-                            onClick = { uploadPickerLauncher.launch(arrayOf("*/*")) },
-                            modifier = Modifier.testTag("upload_remote_file_button")
+                        Surface(
+                            shape = CircleShape,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier
+                                .clip(CircleShape)
+                                .clickable { uploadPickerLauncher.launch(arrayOf("*/*")) }
+                                .testTag("upload_remote_file_button")
                         ) {
-                            Icon(
-                                imageVector = Icons.Filled.CloudUpload,
-                                contentDescription = null,
-                                modifier = Modifier.size(18.dp)
-                            )
-                            Spacer(modifier = Modifier.width(6.dp))
-                            Text("Upload")
+                            Row(
+                                modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Filled.CloudUpload,
+                                    contentDescription = null,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(16.dp)
+                                )
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "Upload",
+                                    style = MaterialTheme.typography.labelLarge,
+                                    color = Color.White
+                                )
+                            }
                         }
                     }
                 }
             }
 
-            // Interactive Breadcrumb Bar
-            BreadcrumbStrip(
+            // Clean Finder / iOS Files Path Bar
+            FinderPathBar(
                 currentPath = currentPath,
                 canGoUp = currentPath != "/" && currentPath.isNotBlank(),
                 onNavigateUp = onNavigateUp,
                 onSelectBreadcrumbPath = onNavigateToDirectory
             )
 
-            Spacer(modifier = Modifier.height(10.dp))
+            Spacer(modifier = Modifier.height(14.dp))
 
-            // State-specific Directory Content
             when {
                 selectedDevice == null -> {
-                    StatusMessageCard(
+                    AppleFilesStatusPlatter(
                         icon = Icons.Filled.WarningAmber,
+                        tint = AppleOrange,
                         title = "No Device Selected",
-                        body = "Select a paired KDE Connect device above to browse its exported filesystem."
+                        body = "Choose a paired device from the capsule above to browse its shared folders."
                     )
                 }
 
                 selectedDevice.pairState != PairState.PAIRED -> {
-                    StatusMessageCard(
+                    AppleFilesStatusPlatter(
                         icon = Icons.Filled.WarningAmber,
-                        title = "TLS Pairing Required",
+                        tint = AppleOrange,
+                        title = "Pairing Required",
                         body = stringResource(R.string.files_unpaired_notice),
                         actionLabel = stringResource(R.string.action_pair),
                         onAction = { onRequestPair(selectedDevice.deviceId) }
@@ -227,10 +254,14 @@ fun RemoteFileBrowserScreen(
                         contentAlignment = Alignment.Center
                     ) {
                         Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                            CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
+                            CircularProgressIndicator(
+                                color = MaterialTheme.colorScheme.primary,
+                                strokeWidth = 3.dp,
+                                modifier = Modifier.size(30.dp)
+                            )
                             Spacer(modifier = Modifier.height(12.dp))
                             Text(
-                                text = "Querying encrypted VFS directory…",
+                                text = "Loading folder…",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -239,19 +270,21 @@ fun RemoteFileBrowserScreen(
                 }
 
                 directoryState is RemoteDirectoryState.Unsupported -> {
-                    StatusMessageCard(
+                    AppleFilesStatusPlatter(
                         icon = Icons.Filled.ErrorOutline,
-                        title = "Platform Capability Unsupported",
+                        tint = AppleOrange,
+                        title = "Not Supported on This Device",
                         body = directoryState.reason
                     )
                 }
 
                 directoryState is RemoteDirectoryState.Error -> {
-                    StatusMessageCard(
+                    AppleFilesStatusPlatter(
                         icon = Icons.Filled.ErrorOutline,
-                        title = "Remote Directory Unavailable",
+                        tint = AppleOrange,
+                        title = "Folder Unavailable",
                         body = directoryState.message,
-                        actionLabel = stringResource(R.string.files_refresh),
+                        actionLabel = "Try Again",
                         onAction = onRefresh
                     )
                 }
@@ -262,69 +295,65 @@ fun RemoteFileBrowserScreen(
                             .fillMaxWidth()
                             .weight(1f)
                             .testTag("remote_files_list"),
-                        contentPadding = PaddingValues(bottom = 24.dp),
-                        verticalArrangement = Arrangement.spacedBy(10.dp)
+                        contentPadding = PaddingValues(bottom = 28.dp),
+                        verticalArrangement = Arrangement.spacedBy(18.dp)
                     ) {
                         if (directoryState.currentPath != "/") {
                             item(key = "__parent_up__") {
-                                Surface(
-                                    shape = RoundedCornerShape(14.dp),
-                                    color = MaterialTheme.colorScheme.surfaceContainerLow,
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .clip(RoundedCornerShape(14.dp))
-                                        .clickable(onClick = onNavigateUp)
-                                        .testTag("parent_dir_row")
-                                ) {
-                                    Row(
-                                        modifier = Modifier.padding(14.dp),
-                                        verticalAlignment = Alignment.CenterVertically
-                                    ) {
-                                        Icon(
-                                            imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                                            contentDescription = null,
-                                            tint = MaterialTheme.colorScheme.primary
-                                        )
-                                        Spacer(modifier = Modifier.width(12.dp))
-                                        Text(
-                                            text = stringResource(R.string.files_up_parent),
-                                            style = MaterialTheme.typography.titleSmall,
-                                            color = MaterialTheme.colorScheme.onSurface
-                                        )
-                                    }
+                                AppleGroupedSection {
+                                    AppleGroupedRow(
+                                        title = "Back to Parent Folder",
+                                        leadingIcon = Icons.AutoMirrored.Filled.ArrowBack,
+                                        iconTint = AppleBlue,
+                                        showChevron = false,
+                                        onClick = onNavigateUp,
+                                        testTag = "parent_dir_row"
+                                    )
                                 }
                             }
                         }
 
                         if (directoryState.entries.isEmpty()) {
                             item {
-                                EmptyDirectoryView()
+                                AppleEmptyFolderPlatter()
                             }
                         } else {
-                            items(directoryState.entries, key = { it.relativePath }) { entry ->
-                                RemoteFileRow(
-                                    entry = entry,
-                                    onClickDirectory = { onNavigateToDirectory(entry.relativePath) },
-                                    onOpenFile = { onDownloadAndOpenFile(context, entry) },
-                                    onSaveToSaf = {
-                                        pendingDownloadEntry = entry
-                                        safDownloadLauncher.launch(entry.name)
+                            item {
+                                Column {
+                                    AppleSectionHeader(title = "${directoryState.entries.size} Items")
+                                    AppleGroupedSection {
+                                        directoryState.entries.forEachIndexed { index, entry ->
+                                            AppleFinderRow(
+                                                entry = entry,
+                                                onClickDirectory = { onNavigateToDirectory(entry.relativePath) },
+                                                onOpenFile = { onDownloadAndOpenFile(context, entry) },
+                                                onSaveToSaf = {
+                                                    pendingDownloadEntry = entry
+                                                    safDownloadLauncher.launch(entry.name)
+                                                }
+                                            )
+                                            if (index < directoryState.entries.lastIndex) {
+                                                AppleInsetDivider()
+                                            }
+                                        }
                                     }
-                                )
+                                }
                             }
                         }
 
                         if (recentTransfers.isNotEmpty()) {
                             item {
-                                Spacer(modifier = Modifier.height(8.dp))
-                                Text(
-                                    text = "Verified Transfer Ledger",
-                                    style = MaterialTheme.typography.titleSmall,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
-                            items(recentTransfers.take(5), key = { it.transferId }) { rec ->
-                                TransferHistoryItem(rec)
+                                Column {
+                                    AppleSectionHeader(title = "Recent Transfers")
+                                    AppleGroupedSection {
+                                        recentTransfers.take(5).forEachIndexed { index, rec ->
+                                            AppleTransferLedgerRow(rec)
+                                            if (index < minOf(recentTransfers.size, 5) - 1) {
+                                                AppleInsetDivider()
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -332,8 +361,8 @@ fun RemoteFileBrowserScreen(
 
                 else -> {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Button(onClick = onRefresh) {
-                            Text("Load Remote Export Root")
+                        Button(onClick = onRefresh, shape = CircleShape) {
+                            Text("Open Shared Folder")
                         }
                     }
                 }
@@ -343,7 +372,7 @@ fun RemoteFileBrowserScreen(
 }
 
 @Composable
-private fun BreadcrumbStrip(
+private fun FinderPathBar(
     currentPath: String,
     canGoUp: Boolean,
     onNavigateUp: () -> Unit,
@@ -352,8 +381,9 @@ private fun BreadcrumbStrip(
     val segments = currentPath.split('/').filter { it.isNotBlank() }
 
     Surface(
-        shape = RoundedCornerShape(14.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        shape = RoundedCornerShape(12.dp),
+        color = MaterialTheme.colorScheme.surface,
+        shadowElevation = 0.5.dp,
         modifier = Modifier.fillMaxWidth()
     ) {
         Row(
@@ -367,231 +397,159 @@ private fun BreadcrumbStrip(
                 IconButton(
                     onClick = onNavigateUp,
                     modifier = Modifier
-                        .size(36.dp)
+                        .size(28.dp)
                         .testTag("breadcrumb_up_button")
                 ) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = "Up directory",
-                        modifier = Modifier.size(18.dp)
+                        contentDescription = "Back",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(17.dp)
                     )
                 }
                 Spacer(modifier = Modifier.width(4.dp))
             }
 
-            Surface(
-                shape = RoundedCornerShape(8.dp),
-                color = if (segments.isEmpty()) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainer,
+            Text(
+                text = "Shared Root",
+                style = MaterialTheme.typography.labelLarge,
+                color = if (segments.isEmpty()) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.primary,
+                fontWeight = if (segments.isEmpty()) FontWeight.SemiBold else FontWeight.Medium,
                 modifier = Modifier
-                    .clip(RoundedCornerShape(8.dp))
+                    .clip(RoundedCornerShape(6.dp))
                     .clickable { onSelectBreadcrumbPath("/") }
+                    .padding(horizontal = 6.dp, vertical = 2.dp)
                     .testTag("breadcrumb_root")
-            ) {
-                Text(
-                    text = "/root",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
-                )
-            }
+            )
 
             var accumulated = ""
             segments.forEachIndexed { idx, seg ->
                 accumulated += "/$seg"
                 val target = accumulated
-                Text(
-                    text = " / ",
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                val isLast = idx == segments.lastIndex
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f),
+                    modifier = Modifier.size(16.dp)
                 )
-                Surface(
-                    shape = RoundedCornerShape(8.dp),
-                    color = if (idx == segments.lastIndex) {
-                        MaterialTheme.colorScheme.primaryContainer
-                    } else {
-                        MaterialTheme.colorScheme.surfaceContainer
-                    },
+                Text(
+                    text = seg,
+                    style = MaterialTheme.typography.labelLarge,
+                    color = if (isLast) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.primary,
+                    fontWeight = if (isLast) FontWeight.SemiBold else FontWeight.Medium,
                     modifier = Modifier
-                        .clip(RoundedCornerShape(8.dp))
+                        .clip(RoundedCornerShape(6.dp))
                         .clickable { onSelectBreadcrumbPath(target) }
-                ) {
-                    Text(
-                        text = seg,
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp)
-                    )
-                }
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                )
             }
         }
     }
 }
 
 @Composable
-private fun RemoteFileRow(
+private fun AppleFinderRow(
     entry: RemoteFileEntry,
     onClickDirectory: () -> Unit,
     onOpenFile: () -> Unit,
     onSaveToSaf: () -> Unit
 ) {
-    val icon = when {
-        entry.isDirectory -> Icons.Filled.Folder
-        entry.mimeType.startsWith("image/") -> Icons.Filled.Image
-        entry.name.endsWith(".json") || entry.name.endsWith(".sh") || entry.name.endsWith(".kt") -> Icons.Filled.Code
-        entry.mimeType.startsWith("text/") -> Icons.Filled.Description
-        else -> Icons.AutoMirrored.Filled.InsertDriveFile
+    val (icon, tint) = when {
+        entry.isDirectory -> Icons.Filled.Folder to AppleBlue
+        entry.mimeType.startsWith("image/") -> Icons.Filled.Image to AppleTeal
+        entry.name.endsWith(".json") || entry.name.endsWith(".sh") || entry.name.endsWith(".kt") ->
+            Icons.Filled.Code to AppleIndigo
+        entry.mimeType.startsWith("text/") -> Icons.Filled.Description to AppleOrange
+        else -> Icons.AutoMirrored.Filled.InsertDriveFile to Color(0xFF8E8E93)
     }
 
-    Card(
-        shape = RoundedCornerShape(16.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer),
-        modifier = Modifier
-            .fillMaxWidth()
-            .clip(RoundedCornerShape(16.dp))
-            .clickable {
-                if (entry.isDirectory) onClickDirectory() else onOpenFile()
-            }
-            .testTag("vfs_entry_${entry.name}")
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.weight(1f)
-            ) {
-                Box(
-                    modifier = Modifier
-                        .size(42.dp)
-                        .clip(RoundedCornerShape(12.dp))
-                        .background(
-                            if (entry.isDirectory) BreezeCyan.copy(alpha = 0.16f)
-                            else BreezeTeal.copy(alpha = 0.15f)
-                        ),
-                    contentAlignment = Alignment.Center
-                ) {
-                    Icon(
-                        imageVector = icon,
-                        contentDescription = entry.name,
-                        tint = if (entry.isDirectory) BreezeCyan else BreezeTeal
-                    )
-                }
-                Spacer(modifier = Modifier.width(12.dp))
-                Column {
-                    Text(
-                        text = entry.name,
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.onSurface,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                    val metaText = if (entry.isDirectory) {
-                        "Directory • ${formatDateAndTime(entry.lastModifiedEpochMs)}"
-                    } else {
-                        "${formatByteSize(entry.sizeBytes)} • ${entry.mimeType} • ${formatDateAndTime(entry.lastModifiedEpochMs)}"
-                    }
-                    Text(
-                        text = metaText,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-            }
+    val subtitle = if (entry.isDirectory) {
+        "Folder • ${formatDateAndTime(entry.lastModifiedEpochMs)}"
+    } else {
+        "${formatByteSize(entry.sizeBytes)} • ${formatDateAndTime(entry.lastModifiedEpochMs)}"
+    }
 
-            if (!entry.isDirectory) {
+    AppleGroupedRow(
+        title = entry.name,
+        subtitle = subtitle,
+        leadingIcon = icon,
+        iconTint = tint,
+        onClick = { if (entry.isDirectory) onClickDirectory() else onOpenFile() },
+        testTag = "vfs_entry_${entry.name}",
+        trailingContent = if (entry.isDirectory) {
+            null
+        } else {
+            {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     IconButton(
-                        onClick = onOpenFile,
-                        modifier = Modifier.testTag("open_file_${entry.name}")
-                    ) {
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.OpenInNew,
-                            contentDescription = stringResource(R.string.files_open_local),
-                            tint = MaterialTheme.colorScheme.primary
-                        )
-                    }
-                    IconButton(
                         onClick = onSaveToSaf,
-                        modifier = Modifier.testTag("download_saf_${entry.name}")
+                        modifier = Modifier
+                            .size(36.dp)
+                            .testTag("download_saf_${entry.name}")
                     ) {
                         Icon(
                             imageVector = Icons.Filled.Download,
                             contentDescription = stringResource(R.string.files_download_saf),
-                            tint = MaterialTheme.colorScheme.secondary
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp)
                         )
                     }
                 }
             }
         }
-    }
+    )
 }
 
 @Composable
-private fun EmptyDirectoryView() {
-    Column(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 28.dp),
-        horizontalAlignment = Alignment.CenterHorizontally
-    ) {
-        Image(
-            painter = painterResource(id = R.drawable.img_empty_vault),
-            contentDescription = null,
-            contentScale = ContentScale.Crop,
+private fun AppleEmptyFolderPlatter() {
+    AppleGroupedSection {
+        Column(
             modifier = Modifier
-                .size(150.dp)
-                .clip(RoundedCornerShape(20.dp))
-        )
-        Spacer(modifier = Modifier.height(12.dp))
-        Text(
-            text = stringResource(R.string.files_empty_dir),
-            style = MaterialTheme.typography.titleMedium,
-            color = MaterialTheme.colorScheme.onSurface
-        )
-        Text(
-            text = "Tap Upload above to push documents or media into this remote folder.",
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center
-        )
+                .fillMaxWidth()
+                .padding(vertical = 36.dp, horizontal = 24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            AppleSquircleIcon(
+                icon = Icons.Filled.FolderOpen,
+                tintColor = AppleBlue,
+                sizeDp = 48
+            )
+            Spacer(modifier = Modifier.height(14.dp))
+            Text(
+                text = "Folder is Empty",
+                style = MaterialTheme.typography.titleMedium,
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Spacer(modifier = Modifier.height(4.dp))
+            Text(
+                text = "Tap Upload above to send files from your phone directly into this folder.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+        }
     }
 }
 
 @Composable
-private fun StatusMessageCard(
+private fun AppleFilesStatusPlatter(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
+    tint: Color,
     title: String,
     body: String,
     actionLabel: String? = null,
     onAction: (() -> Unit)? = null
 ) {
-    Card(
-        shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerHigh),
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(vertical = 16.dp)
-            .testTag("files_status_card")
-    ) {
+    AppleGroupedSection(modifier = Modifier.testTag("files_status_card")) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(22.dp),
+                .padding(28.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                tint = MaterialTheme.colorScheme.tertiary,
-                modifier = Modifier.size(40.dp)
-            )
-            Spacer(modifier = Modifier.height(12.dp))
+            AppleSquircleIcon(icon = icon, tintColor = tint, sizeDp = 46)
+            Spacer(modifier = Modifier.height(14.dp))
             Text(
                 text = title,
                 style = MaterialTheme.typography.titleLarge,
@@ -609,6 +567,7 @@ private fun StatusMessageCard(
                 Spacer(modifier = Modifier.height(16.dp))
                 OutlinedButton(
                     onClick = onAction,
+                    shape = CircleShape,
                     modifier = Modifier.testTag("files_status_action_button")
                 ) {
                     Text(actionLabel)
@@ -619,49 +578,29 @@ private fun StatusMessageCard(
 }
 
 @Composable
-private fun TransferHistoryItem(record: TransferRecordEntity) {
-    Surface(
-        shape = RoundedCornerShape(12.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
-        modifier = Modifier.fillMaxWidth()
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 12.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "${record.direction}: ${record.fileName}",
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
-                Text(
-                    text = buildString {
-                        append(record.status)
-                        if (!record.sha256Checksum.isNullOrBlank()) {
-                            append(" • SHA-256 ${record.sha256Checksum.take(10)}…")
-                        }
-                        if (!record.errorMessage.isNullOrBlank()) {
-                            append(" • ${record.errorMessage}")
-                        }
-                    },
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
+private fun AppleTransferLedgerRow(record: TransferRecordEntity) {
+    val sub = buildString {
+        append(record.status.lowercase().replaceFirstChar { it.uppercase() })
+        if (!record.sha256Checksum.isNullOrBlank()) {
+            append(" • Verified SHA-256")
+        }
+        if (!record.errorMessage.isNullOrBlank()) {
+            append(" • ${record.errorMessage}")
+        }
+    }
+    AppleGroupedRow(
+        title = record.fileName,
+        subtitle = sub,
+        showChevron = false,
+        trailingContent = {
             if (record.status == "COMPLETED") {
                 Icon(
                     imageVector = Icons.Filled.Verified,
-                    contentDescription = "Integrity verified",
-                    tint = EmeraldSuccess,
+                    contentDescription = "Verified",
+                    tint = AppleGreen,
                     modifier = Modifier.size(18.dp)
                 )
             }
         }
-    }
+    )
 }
