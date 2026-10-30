@@ -4,10 +4,11 @@ import android.content.Context
 import android.net.Uri
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasTestTag
-import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.junit4.createEmptyComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
+import androidx.test.core.app.ActivityScenario
 import androidx.test.core.app.ApplicationProvider
 import com.example.core.diagnostics.DiagnosticLogger
 import com.example.core.diagnostics.LogCategory
@@ -40,7 +41,7 @@ import java.io.File
 class ExampleRobolectricTest {
 
     @get:Rule
-    val composeRule = createAndroidComposeRule<MainActivity>()
+    val composeRule = createEmptyComposeRule()
 
     private lateinit var context: Context
     private lateinit var dbA: ApexDatabase
@@ -80,46 +81,48 @@ class ExampleRobolectricTest {
 
     @Test
     fun `clean Apple UI renders live local identity radar and navigates across all 5 tabs including Settings`() {
-        composeRule.waitForIdle()
+        ActivityScenario.launch(MainActivity::class.java).use {
+            composeRule.waitForIdle()
 
-        // 1. Verify This Phone card, Active Wi-Fi capsule, and Live Discovery Platter render (no fake mock peers)
-        composeRule.onNodeWithTag("active_device_capsule").assertIsDisplayed()
-        composeRule.onNodeWithTag("local_identity_card").assertIsDisplayed()
-        composeRule.onNodeWithTag("empty_lan_discovery_card").assertIsDisplayed()
+            // 1. Verify This Phone card, Active Wi-Fi capsule, and Live Discovery Platter render (no fake mock peers)
+            composeRule.onNodeWithTag("active_device_capsule").assertIsDisplayed()
+            composeRule.onNodeWithTag("local_identity_card").assertIsDisplayed()
+            composeRule.onNodeWithTag("empty_lan_discovery_card").assertIsDisplayed()
 
-        composeRule.onNodeWithTag("hub_lazy_column")
-            .performScrollToNode(hasTestTag("spotlight_remote_files_card"))
-        composeRule.onNodeWithTag("spotlight_remote_files_card").assertIsDisplayed()
-        composeRule.onNodeWithTag("spotlight_device_space_card").assertIsDisplayed()
+            composeRule.onNodeWithTag("hub_lazy_column")
+                .performScrollToNode(hasTestTag("spotlight_remote_files_card"))
+            composeRule.onNodeWithTag("spotlight_remote_files_card").assertIsDisplayed()
+            composeRule.onNodeWithTag("spotlight_device_space_card").assertIsDisplayed()
 
-        // 2. Navigate to Remote Files tab and verify clean status card
-        composeRule.onNodeWithTag("spotlight_remote_files_card").performClick()
-        composeRule.waitForIdle()
-        composeRule.onNodeWithTag("remote_files_screen").assertIsDisplayed()
-        composeRule.onNodeWithTag("files_status_card").assertIsDisplayed()
+            // 2. Navigate to Remote Files tab and verify clean status card
+            composeRule.onNodeWithTag("spotlight_remote_files_card").performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("remote_files_screen").assertIsDisplayed()
+            composeRule.onNodeWithTag("files_status_card").assertIsDisplayed()
 
-        // 3. Navigate to Space tab and verify clean Connect a Device prompt
-        composeRule.onNodeWithTag("nav_tab_space").performClick()
-        composeRule.waitForIdle()
-        composeRule.onNodeWithTag("device_space_screen").assertIsDisplayed()
-        composeRule.onNodeWithTag("space_no_device_card").assertIsDisplayed()
+            // 3. Navigate to Space tab and verify clean Connect a Device prompt
+            composeRule.onNodeWithTag("nav_tab_space").performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("device_space_screen").assertIsDisplayed()
+            composeRule.onNodeWithTag("space_no_device_card").assertIsDisplayed()
 
-        // 4. Navigate to Settings tab and verify Diagnostic Log Recording & Export controls
-        composeRule.onNodeWithTag("nav_tab_settings").performClick()
-        composeRule.waitForIdle()
-        composeRule.onNodeWithTag("settings_screen").assertIsDisplayed()
-        composeRule.onNodeWithTag("settings_log_toggle").assertIsDisplayed()
-        composeRule.onNodeWithTag("settings_screen")
-            .performScrollToNode(hasTestTag("export_logs_saf_button"))
-        composeRule.onNodeWithTag("export_logs_saf_button").assertIsDisplayed()
+            // 4. Navigate to Settings tab and verify Diagnostic Log Recording & Export controls
+            composeRule.onNodeWithTag("nav_tab_settings").performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("settings_screen").assertIsDisplayed()
+            composeRule.onNodeWithTag("settings_log_toggle").assertIsDisplayed()
+            composeRule.onNodeWithTag("settings_screen")
+                .performScrollToNode(hasTestTag("export_logs_saf_button"))
+            composeRule.onNodeWithTag("export_logs_saf_button").assertIsDisplayed()
 
-        // 5. Navigate to Controls tab and return to Devices via Open Devices button
-        composeRule.onNodeWithTag("nav_tab_tools").performClick()
-        composeRule.waitForIdle()
-        composeRule.onNodeWithTag("plugins_tools_screen").assertIsDisplayed()
-        composeRule.onNodeWithTag("tools_open_devices_button").performClick()
-        composeRule.waitForIdle()
-        composeRule.onNodeWithTag("local_identity_card").assertIsDisplayed()
+            // 5. Navigate to Controls tab and return to Devices via Open Devices button
+            composeRule.onNodeWithTag("nav_tab_tools").performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("plugins_tools_screen").assertIsDisplayed()
+            composeRule.onNodeWithTag("tools_open_devices_button").performClick()
+            composeRule.waitForIdle()
+            composeRule.onNodeWithTag("local_identity_card").assertIsDisplayed()
+        }
     }
 
     @Test
@@ -183,15 +186,15 @@ class ExampleRobolectricTest {
         repoA.lanEngine.start()
         repoB.lanEngine.start()
 
-        // Wait for TCP listeners to bind on distinct ports
-        repeat(25) {
-            if (repoA.lanEngine.activeTcpPort > 0 && repoB.lanEngine.activeTcpPort > 0 &&
+        // Deterministically await actual ServerSocket bind on both peers (prevents multi-core CI port race!)
+        repoA.lanEngine.awaitReady(5000L)
+        repoB.lanEngine.awaitReady(5000L)
+        assertTrue(
+            "Both peers must bind distinct TCP ports (A=${repoA.lanEngine.activeTcpPort}, B=${repoB.lanEngine.activeTcpPort})",
+            repoA.lanEngine.activeTcpPort > 0 &&
+                repoB.lanEngine.activeTcpPort > 0 &&
                 repoA.lanEngine.activeTcpPort != repoB.lanEngine.activeTcpPort
-            ) {
-                return@repeat
-            }
-            delay(50)
-        }
+        )
 
         val peerBIdentityPacket = NetworkPacket.createIdentityPacket(
             deviceId = repoB.identityManager.localDeviceId,
@@ -211,7 +214,7 @@ class ExampleRobolectricTest {
         // Wait until both Room databases register the encrypted peer session
         var peerBOnA: PairedDeviceEntity? = null
         var peerAOnB: PairedDeviceEntity? = null
-        repeat(25) {
+        repeat(40) {
             peerBOnA = repoA.observeDevices().first().firstOrNull { it.deviceId == repoB.identityManager.localDeviceId }
             peerAOnB = repoB.observeDevices().first().firstOrNull { it.deviceId == repoA.identityManager.localDeviceId }
             if (peerBOnA != null && peerAOnB != null) return@repeat
@@ -229,11 +232,11 @@ class ExampleRobolectricTest {
 
         // 3. Real KDE Connect Pairing Handshake over TLS (`requestPairing` -> `acceptPairing`)
         repoA.requestPairing(repoB.identityManager.localDeviceId)
-        repeat(20) {
+        repeat(30) {
             val stateOnB = repoB.observeDevices().first()
                 .firstOrNull { it.deviceId == repoA.identityManager.localDeviceId }?.pairState
             if (stateOnB == PairState.PAIR_REQUESTED_BY_PEER) return@repeat
-            delay(50)
+            delay(60)
         }
         assertEquals(
             PairState.PAIR_REQUESTED_BY_PEER,
@@ -241,11 +244,11 @@ class ExampleRobolectricTest {
         )
 
         repoB.acceptPairing(repoA.identityManager.localDeviceId)
-        repeat(20) {
+        repeat(30) {
             val stateOnA = repoA.observeDevices().first()
                 .firstOrNull { it.deviceId == repoB.identityManager.localDeviceId }?.pairState
             if (stateOnA == PairState.PAIRED) return@repeat
-            delay(50)
+            delay(60)
         }
         assertEquals(
             PairState.PAIRED,

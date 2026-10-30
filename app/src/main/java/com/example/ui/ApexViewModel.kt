@@ -774,6 +774,11 @@ class ApexViewModel(
         }
     }
 
+    override fun onCleared() {
+        super.onCleared()
+        repository.lanEngine.stop()
+    }
+
     class Factory(private val application: Application) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {

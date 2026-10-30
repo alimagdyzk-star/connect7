@@ -23,6 +23,9 @@ jobs:
     # Pin ubuntu-24.04 explicitly (avoids ubuntu-latest migration notice & includes preinstalled Android SDK)
     runs-on: ubuntu-24.04
 
+    env:
+      JAVA_TOOL_OPTIONS: "-Djava.awt.headless=true -Dfile.encoding=UTF-8"
+
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v5
@@ -47,7 +50,8 @@ jobs:
 
           if [ -n "$SDKMANAGER" ]; then
             yes | "$SDKMANAGER" --licenses > /dev/null || true
-            "$SDKMANAGER" --install "platform-tools" "build-tools;36.0.0" "platforms;android-36" "platforms;android-36.1"
+            "$SDKMANAGER" --install "platform-tools" "build-tools;36.0.0" "platforms;android-36"
+            "$SDKMANAGER" --install "platforms;android-36.1" || echo "Note: platforms;android-36.1 not separate on mirror, checking SDK..."
           else
             echo "Warning: sdkmanager not found in PATH; relying on preinstalled SDK packages."
           fi
@@ -93,18 +97,38 @@ jobs:
             echo "KEY_PASSWORD=apexconnectrelease" >> "$GITHUB_ENV"
           fi
 
-      - name: Run Unit & Robolectric Tests
-        run: gradle :app:testDebugUnitTest --no-daemon
-
       - name: Build Signed Release & Debug APKs
         run: |
-          gradle :app:assembleRelease :app:assembleDebug --no-daemon
+          gradle :app:assembleRelease :app:assembleDebug \
+            --no-daemon \
+            --no-configuration-cache \
+            -Dorg.gradle.jvmargs="-Xmx3584m -XX:MaxMetaspaceSize=1024m -Djava.awt.headless=true -Dfile.encoding=UTF-8" \
+            --stacktrace
+
           mkdir -p dist
-          cp app/build/outputs/apk/release/app-release.apk dist/ApexConnect-release.apk
-          cp app/build/outputs/apk/debug/app-debug.apk dist/ApexConnect-debug.apk
+          RELEASE_APK="$(find app/build/outputs/apk/release -name '*.apk' | head -n 1)"
+          DEBUG_APK="$(find app/build/outputs/apk/debug -name '*.apk' | head -n 1)"
+
+          if [ -z "$RELEASE_APK" ] || [ -z "$DEBUG_APK" ]; then
+            echo "Error: Expected APK outputs not found!"
+            find app/build/outputs -maxdepth 4 || true
+            exit 1
+          fi
+
+          cp "$RELEASE_APK" dist/ApexConnect-release.apk
+          cp "$DEBUG_APK" dist/ApexConnect-debug.apk
           sha256sum dist/ApexConnect-release.apk dist/ApexConnect-debug.apk > dist/SHA256SUMS.txt
 
+      - name: Run Unit & Robolectric Tests
+        run: |
+          gradle :app:testDebugUnitTest \
+            --no-daemon \
+            --no-configuration-cache \
+            -Dorg.gradle.jvmargs="-Xmx2560m -XX:MaxMetaspaceSize=768m -Djava.awt.headless=true -Dfile.encoding=UTF-8" \
+            --stacktrace
+
       - name: Upload APK Build Artifacts
+        if: always() && hashFiles('dist/ApexConnect-release.apk') != ''
         uses: actions/upload-artifact@v5
         with:
           name: ApexConnect-APKs
@@ -127,7 +151,7 @@ jobs:
 
           cat <<EOF > dist/RELEASE_NOTES.md
           ## ApexConnect ${TAG_NAME}
-          Unified Peer-to-Peer Android application combining **KDE Connect Protocol v8** with **Remote File Browsing (\`kdeconnect.vfs.*\`)** and **Persistent Device Chat & Notes (\`kdeconnect.space.*\`)**.
+          Native Android application combining **KDE Connect** LAN discovery & mutual TLS pairing with **Remote File Browsing (\`kdeconnect.sftp\` / \`kdeconnect.vfs.*\`)**, **Persistent Device Space / Bulletin (\`kdeconnect.space.*\`)**, and **Diagnostic Log Export**.
 
           ### Attached Installers
           - **\`ApexConnect-release.apk\`** — Signed Release APK ready to install on Android 7.0+ (API 24+).
@@ -135,18 +159,21 @@ jobs:
           - **\`SHA256SUMS.txt\`** — Cryptographic SHA-256 checksums for APK verification.
           EOF
 
-          # Create or update the GitHub Release natively via preinstalled GitHub CLI (`gh`) — zero Node.js deprecation warnings!
-          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+          # Create or update the GitHub Release natively via preinstalled GitHub CLI (`gh`)
+          if gh release view "$TAG_NAME" --repo "${{ github.repository }}" >/dev/null 2>&1; then
             gh release upload "$TAG_NAME" \
               dist/ApexConnect-release.apk \
               dist/ApexConnect-debug.apk \
               dist/SHA256SUMS.txt \
+              --repo "${{ github.repository }}" \
               --clobber
           else
             gh release create "$TAG_NAME" \
               dist/ApexConnect-release.apk \
               dist/ApexConnect-debug.apk \
               dist/SHA256SUMS.txt \
+              --repo "${{ github.repository }}" \
+              --target "${{ github.sha }}" \
               --title "ApexConnect ${TAG_NAME}" \
               --notes-file dist/RELEASE_NOTES.md
           fi
