@@ -2,12 +2,12 @@ package com.example
 
 import android.content.Context
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
-import androidx.compose.ui.test.performTextInput
+import androidx.compose.ui.test.performScrollToNode
 import androidx.test.core.app.ApplicationProvider
-import com.example.core.network.LanLinkEngine
 import com.example.core.protocol.NetworkPacket
 import com.example.core.security.CryptoIdentityManager
 import com.example.data.local.ApexDatabase
@@ -30,7 +30,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.RobolectricTestRunner
 import org.robolectric.annotation.Config
-import java.io.ByteArrayOutputStream
+import java.io.File
 
 @RunWith(RobolectricTestRunner::class)
 @Config(sdk = [36])
@@ -40,61 +40,74 @@ class ExampleRobolectricTest {
     val composeRule = createAndroidComposeRule<MainActivity>()
 
     private lateinit var context: Context
-    private lateinit var database: ApexDatabase
-    private lateinit var repository: ApexRepository
+    private lateinit var dbA: ApexDatabase
+    private lateinit var dbB: ApexDatabase
+    private lateinit var repoA: ApexRepository
+    private lateinit var repoB: ApexRepository
 
     @Before
     fun setUp() {
         context = ApplicationProvider.getApplicationContext()
-        database = ApexDatabase.createInMemory(context)
-        val crypto = CryptoIdentityManager(context)
-        repository = ApexRepository(context, database, crypto)
-        repository.lanEngine.start()
+        dbA = ApexDatabase.createInMemory(context)
+        dbB = ApexDatabase.createInMemory(context)
+
+        val cryptoA = CryptoIdentityManager(context, profilePrefix = "test_peer_a_")
+        val cryptoB = CryptoIdentityManager(context, profilePrefix = "test_peer_b_")
+        cryptoA.localDeviceName = "Phone Alpha"
+        cryptoB.localDeviceName = "Workstation Beta"
+
+        repoA = ApexRepository(context, dbA, cryptoA)
+        repoB = ApexRepository(context, dbB, cryptoB)
     }
 
     @After
     fun tearDown() {
-        repository.lanEngine.stop()
-        database.close()
+        repoA.lanEngine.stop()
+        repoB.lanEngine.stop()
+        dbA.close()
+        dbB.close()
     }
 
     @Test
-    fun `app_name matches ApexConnect branding`() {
+    fun `app_name matches ApexConnect branding and cold boot contains zero fake demo devices`() = runBlocking {
         assertEquals("ApexConnect", context.getString(R.string.app_name))
+        val initialDevices = repoA.observeDevices().first()
+        assertTrue("Cold startup must have zero fake demo devices", initialDevices.isEmpty())
     }
 
     @Test
-    fun `apple redesigned UI navigates cleanly across Devices, Browse Files, Space Messages & Notes, and Controls`() {
+    fun `clean Apple UI renders live local identity radar on startup and navigates across all tabs`() {
         composeRule.waitForIdle()
 
-        // 1. Verify clean Hub screen renders with Active Device capsule & Continuity Workspace cards
+        // 1. Verify This Phone card, Active Wi-Fi capsule, and Live Discovery Platter render (no fake mock peers)
         composeRule.onNodeWithTag("active_device_capsule").assertIsDisplayed()
+        composeRule.onNodeWithTag("local_identity_card").assertIsDisplayed()
+        composeRule.onNodeWithTag("empty_lan_discovery_card").assertIsDisplayed()
+
+        composeRule.onNodeWithTag("hub_lazy_column")
+            .performScrollToNode(hasTestTag("spotlight_remote_files_card"))
         composeRule.onNodeWithTag("spotlight_remote_files_card").assertIsDisplayed()
         composeRule.onNodeWithTag("spotlight_device_space_card").assertIsDisplayed()
 
-        // 2. Navigate to Apple Files-style Remote Browser via Spotlight card
+        // 2. Navigate to Remote Files tab and verify clean status card
         composeRule.onNodeWithTag("spotlight_remote_files_card").performClick()
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("remote_files_screen").assertIsDisplayed()
+        composeRule.onNodeWithTag("files_status_card").assertIsDisplayed()
 
-        // 3. Navigate to iMessage & Apple Notes Space tab, send a message, and switch to Notes segment
+        // 3. Navigate to Space tab and verify clean Connect a Device prompt
         composeRule.onNodeWithTag("nav_tab_space").performClick()
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("device_space_screen").assertIsDisplayed()
-        composeRule.onNodeWithTag("chat_message_input").performTextInput("Hello from Apple UI test")
-        composeRule.onNodeWithTag("send_message_button").performClick()
-        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("space_no_device_card").assertIsDisplayed()
 
-        // Switch segmented control to Notes
-        composeRule.onNodeWithTag("subtab_notes").performClick()
-        composeRule.waitForIdle()
-        composeRule.onNodeWithTag("new_note_fab").assertIsDisplayed()
-
-        // 4. Navigate to Control Center / Trackpad tab
+        // 4. Navigate to Controls tab and return to Devices via Open Devices button
         composeRule.onNodeWithTag("nav_tab_tools").performClick()
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("plugins_tools_screen").assertIsDisplayed()
-        composeRule.onNodeWithTag("remote_touchpad_surface").assertIsDisplayed()
+        composeRule.onNodeWithTag("tools_open_devices_button").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("local_identity_card").assertIsDisplayed()
     }
 
     @Test
@@ -117,89 +130,129 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `remote file browser enforces pairing, capability checks, directory listing, and verified download`() = runBlocking {
-        delay(150)
+    fun `real two-peer X509 mutual TLS handshake, KDE Connect pairing, remote directory browse, and SHA-256 download`() = runBlocking {
+        repoA.lanEngine.start()
+        repoB.lanEngine.start()
 
-        val pairedWs = PairedDeviceEntity(
-            deviceId = LanLinkEngine.WORKSTATION_PEER_ID,
-            deviceName = "Test Workstation",
+        // Wait for TCP listeners to bind on distinct ports
+        repeat(25) {
+            if (repoA.lanEngine.activeTcpPort > 0 && repoB.lanEngine.activeTcpPort > 0 &&
+                repoA.lanEngine.activeTcpPort != repoB.lanEngine.activeTcpPort
+            ) {
+                return@repeat
+            }
+            delay(50)
+        }
+
+        val peerBIdentityPacket = NetworkPacket.createIdentityPacket(
+            deviceId = repoB.identityManager.localDeviceId,
+            deviceName = repoB.identityManager.localDeviceName,
             deviceType = "desktop",
-            platformOs = "Linux",
-            ipAddress = "127.0.0.1",
-            tcpPort = repository.lanEngine.activeTcpPort,
-            pairState = PairState.UNPAIRED,
-            isReachable = true,
-            certificateFingerprint = "AA:BB:CC",
-            verificationCode = "1234 - 5678",
-            supportsRemoteFs = true,
-            isLoopbackNode = true
+            tcpPort = repoB.lanEngine.activeTcpPort
         )
-        database.deviceDao().upsertDevice(pairedWs)
 
-        val unpairedBrowse = repository.listRemoteDirectory(pairedWs.deviceId, "/")
+        // 1. Establish real TCP -> Inverted Mutual X.509 TLS link between Peer A and Peer B!
+        val connected = repoA.lanEngine.initiateOutgoingConnectionToPeer(
+            remoteIp = "127.0.0.1",
+            peerTcpPort = repoB.lanEngine.activeTcpPort,
+            udpIdentityPacket = peerBIdentityPacket
+        )
+        assertTrue("Expected real X.509 mutual TLS handshake to succeed", connected)
+
+        // Wait until both Room databases register the encrypted peer session
+        var peerBOnA: PairedDeviceEntity? = null
+        var peerAOnB: PairedDeviceEntity? = null
+        repeat(25) {
+            peerBOnA = repoA.observeDevices().first().firstOrNull { it.deviceId == repoB.identityManager.localDeviceId }
+            peerAOnB = repoB.observeDevices().first().firstOrNull { it.deviceId == repoA.identityManager.localDeviceId }
+            if (peerBOnA != null && peerAOnB != null) return@repeat
+            delay(60)
+        }
+        assertNotNull("Peer A should see Peer B over TLS", peerBOnA)
+        assertNotNull("Peer B should see Peer A over TLS", peerAOnB)
+
+        // Both sides MUST compute the exact same 8-hex-char SHA-256 verification code!
+        assertEquals(peerBOnA!!.verificationCode, peerAOnB!!.verificationCode)
+
+        // 2. Unpaired file browse must be rejected
+        val unpairedBrowse = repoA.listRemoteDirectory(repoB.identityManager.localDeviceId, "/")
         assertTrue(unpairedBrowse.isFailure)
 
-        database.deviceDao().updatePairState(pairedWs.deviceId, PairState.PAIRED)
-        val rootListing = repository.listRemoteDirectory(pairedWs.deviceId, "/")
-        assertTrue("Expected root listing to succeed: ${rootListing.exceptionOrNull()}", rootListing.isSuccess)
-        val (canonicalPath, entries) = rootListing.getOrThrow()
-        assertEquals("/", canonicalPath)
-        assertTrue(entries.any { it.name == "Documents" && it.isDirectory })
-        val readmeEntry = entries.firstOrNull { it.name == "KDE_Connect_SFTP_Export.md" }
-        assertNotNull(readmeEntry)
-
-        val memOut = ByteArrayOutputStream()
-        val shaResult = repository.lanEngine.streamRemoteFileDownload(
-            ipAddress = "127.0.0.1",
-            tcpPort = repository.lanEngine.activeTcpPort,
-            remoteRelativePath = readmeEntry!!.relativePath,
-            destinationOutput = memOut,
-            onProgress = { _, _ -> }
+        // 3. Real KDE Connect Pairing Handshake over TLS (`requestPairing` -> `acceptPairing`)
+        repoA.requestPairing(repoB.identityManager.localDeviceId)
+        repeat(20) {
+            val stateOnB = repoB.observeDevices().first()
+                .firstOrNull { it.deviceId == repoA.identityManager.localDeviceId }?.pairState
+            if (stateOnB == PairState.PAIR_REQUESTED_BY_PEER) return@repeat
+            delay(50)
+        }
+        assertEquals(
+            PairState.PAIR_REQUESTED_BY_PEER,
+            repoB.observeDevices().first().first { it.deviceId == repoA.identityManager.localDeviceId }.pairState
         )
-        assertTrue(shaResult.isSuccess)
-        assertTrue(memOut.toString(Charsets.UTF_8.name()).contains("KDE Connect v8 Authorized Export Root"))
 
-        val tvPeer = pairedWs.copy(
-            deviceId = "tv_no_fs",
-            pairState = PairState.PAIRED,
-            supportsRemoteFs = false
+        repoB.acceptPairing(repoA.identityManager.localDeviceId)
+        repeat(20) {
+            val stateOnA = repoA.observeDevices().first()
+                .firstOrNull { it.deviceId == repoB.identityManager.localDeviceId }?.pairState
+            if (stateOnA == PairState.PAIRED) return@repeat
+            delay(50)
+        }
+        assertEquals(
+            PairState.PAIRED,
+            repoA.observeDevices().first().first { it.deviceId == repoB.identityManager.localDeviceId }.pairState
         )
-        database.deviceDao().upsertDevice(tvPeer)
-        val unsupportedRes = repository.listRemoteDirectory("tv_no_fs", "/")
-        assertTrue(unsupportedRes.exceptionOrNull() is UnsupportedOperationException)
+
+        // 4. Write a real file inside Peer B's exported Documents folder and browse/download it from Peer A over TLS!
+        val docsDir = File(repoB.lanEngine.authorizedVaultRoot, "Documents").apply { mkdirs() }
+        val realRemoteFile = File(docsDir, "live_tls_report.txt")
+        val expectedContent = "Verified real encrypted transfer over KDE Connect TLS 1.3!"
+        realRemoteFile.writeText(expectedContent)
+
+        val dirResult = repoA.listRemoteDirectory(repoB.identityManager.localDeviceId, "/Documents")
+        assertTrue("Expected directory listing over TLS: ${dirResult.exceptionOrNull()}", dirResult.isSuccess)
+        val (path, entries) = dirResult.getOrThrow()
+        assertEquals("/Documents", path)
+        val targetEntry = entries.firstOrNull { it.name == "live_tls_report.txt" }
+        assertNotNull(targetEntry)
+
+        val downloadedResult = repoA.downloadRemoteFile(
+            deviceId = repoB.identityManager.localDeviceId,
+            entry = targetEntry!!,
+            safDestinationUri = null
+        )
+        assertTrue("Expected verified TLS file download: ${downloadedResult.exceptionOrNull()}", downloadedResult.isSuccess)
+        val localDownloadedFile = downloadedResult.getOrThrow()
+        assertNotNull(localDownloadedFile)
+        assertEquals(expectedContent, localDownloadedFile!!.readText())
     }
 
     @Test
-    fun `persistent device space isolates per-device messages, queues offline, deduplicates UUIDs, and resolves note conflicts`() = runBlocking {
-        delay(120)
-
-        val offlinePeer = PairedDeviceEntity(
-            deviceId = "peer_alpha",
+    fun `persistent device space queues offline, deduplicates UUIDs, and resolves LWW notes`() = runBlocking {
+        // 1. Offline queuing & per-device isolation
+        val offlineAlpha = PairedDeviceEntity(
+            deviceId = "offline_peer_1",
             deviceName = "Offline Laptop",
             deviceType = "laptop",
             platformOs = "Linux",
-            ipAddress = "127.0.0.1",
-            tcpPort = repository.lanEngine.activeTcpPort,
+            ipAddress = "192.168.1.99",
+            tcpPort = 1716,
             pairState = PairState.PAIRED,
             isReachable = false,
-            certificateFingerprint = "11:22:33",
-            verificationCode = "ABCD - EF01",
-            isLoopbackNode = true
+            certificateFingerprint = "AA:BB:CC",
+            verificationCode = "1234 5678"
         )
-        val secondPeer = offlinePeer.copy(deviceId = "peer_beta", deviceName = "Second Phone")
-        database.deviceDao().upsertDevices(listOf(offlinePeer, secondPeer))
+        val secondPeer = offlineAlpha.copy(deviceId = "offline_peer_2", deviceName = "Second Phone")
+        dbA.deviceDao().upsertDevices(listOf(offlineAlpha, secondPeer))
 
-        repository.sendTextMessage("peer_alpha", "Queued while offline")
-        val alphaMsgs = repository.observeMessages("peer_alpha").first()
-        val betaMsgs = repository.observeMessages("peer_beta").first()
+        repoA.sendTextMessage("offline_peer_1", "Queued while offline")
+        val alphaMsgs = repoA.observeMessages("offline_peer_1").first()
+        val betaMsgs = repoA.observeMessages("offline_peer_2").first()
         assertEquals(1, alphaMsgs.size)
         assertEquals(SyncStatus.QUEUED_OFFLINE, alphaMsgs.first().syncStatus)
         assertTrue(betaMsgs.isEmpty())
 
-        repository.toggleDeviceReachability("peer_alpha")
-        val syncedMsgs = repository.observeMessages("peer_alpha").first()
-        assertEquals(SyncStatus.SYNCED, syncedMsgs.first().syncStatus)
-
+        // 2. Duplicate incoming UUID deduplication
         val incomingPkt = NetworkPacket(
             type = NetworkPacket.TYPE_SPACE_MESSAGE,
             body = JSONObject().apply {
@@ -210,16 +263,16 @@ class ExampleRobolectricTest {
                 put("updatedAt", 1000L)
             }
         )
-        repository.handleIncomingPacketFromPeer("peer_alpha", incomingPkt, null)
-        repository.handleIncomingPacketFromPeer("peer_alpha", incomingPkt, null)
-        val afterDup = repository.observeMessages("peer_alpha").first()
-        assertEquals(2, afterDup.size)
+        repoA.handleIncomingPacketFromPeer("offline_peer_1", incomingPkt, null)
+        repoA.handleIncomingPacketFromPeer("offline_peer_1", incomingPkt, null)
+        assertEquals(2, repoA.observeMessages("offline_peer_1").first().size)
 
+        // 3. Deterministic Last-Write-Wins (LWW) Note Conflict Resolution
         val olderNote = NetworkPacket(
             type = NetworkPacket.TYPE_SPACE_NOTE,
             body = JSONObject().apply {
                 put("uuid", "shared_note_1")
-                put("authorDeviceId", "peer_alpha")
+                put("authorDeviceId", "offline_peer_1")
                 put("title", "Initial Draft")
                 put("content", "Version 1")
                 put("revision", 1)
@@ -231,7 +284,7 @@ class ExampleRobolectricTest {
             type = NetworkPacket.TYPE_SPACE_NOTE,
             body = JSONObject().apply {
                 put("uuid", "shared_note_1")
-                put("authorDeviceId", "peer_alpha")
+                put("authorDeviceId", "offline_peer_1")
                 put("title", "Updated Spec")
                 put("content", "Version 2 wins")
                 put("revision", 2)
@@ -239,10 +292,10 @@ class ExampleRobolectricTest {
                 put("updatedAt", 5000L)
             }
         )
-        repository.handleIncomingPacketFromPeer("peer_alpha", newerNote, null)
-        repository.handleIncomingPacketFromPeer("peer_alpha", olderNote, null)
+        repoA.handleIncomingPacketFromPeer("offline_peer_1", newerNote, null)
+        repoA.handleIncomingPacketFromPeer("offline_peer_1", olderNote, null)
 
-        val notes = repository.observeNotes("peer_alpha").first()
+        val notes = repoA.observeNotes("offline_peer_1").first()
         assertEquals(1, notes.size)
         assertEquals("Updated Spec", notes.first().title)
         assertEquals("Version 2 wins", notes.first().content)

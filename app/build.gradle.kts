@@ -63,6 +63,12 @@ android {
     compose = true
     buildConfig = true
   }
+  packaging {
+    resources {
+      excludes += "/META-INF/{AL2.0,LGPL2.1}"
+      excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
+    }
+  }
   testOptions { unitTests { isIncludeAndroidResources = true } }
   dependenciesInfo {
     includeInApk = false
@@ -121,6 +127,9 @@ dependencies {
   // implementation(libs.firebase.appcheck.debug)
   implementation(libs.kotlinx.coroutines.android)
   implementation(libs.kotlinx.coroutines.core)
+  implementation(libs.bouncycastle.pkix)
+  implementation(libs.bouncycastle.prov)
+  implementation(libs.mwiede.jsch)
   // implementation(libs.logging.interceptor)
   // implementation(libs.moshi.kotlin)
   // implementation(libs.okhttp)

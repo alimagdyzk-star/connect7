@@ -250,7 +250,44 @@ fun DeviceSpaceScreen(
                 }
             }
 
-            if (selectedDevice != null && selectedDevice.pairState != PairState.PAIRED) {
+            if (selectedDevice == null) {
+                Spacer(modifier = Modifier.height(18.dp))
+                AppleGroupedSection(modifier = Modifier.testTag("space_no_device_card")) {
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(26.dp),
+                        horizontalAlignment = Alignment.CenterHorizontally
+                    ) {
+                        AppleSquircleIcon(
+                            icon = Icons.AutoMirrored.Filled.Chat,
+                            tintColor = AppleBlue,
+                            sizeDp = 46
+                        )
+                        Spacer(modifier = Modifier.height(14.dp))
+                        Text(
+                            text = "Connect a Device First",
+                            style = MaterialTheme.typography.titleLarge,
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "Pair with a computer or phone over Wi-Fi to start a persistent encrypted conversation and shared notes board.",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            textAlign = TextAlign.Center
+                        )
+                        Spacer(modifier = Modifier.height(16.dp))
+                        Button(
+                            onClick = onBackToHub,
+                            shape = CircleShape,
+                            modifier = Modifier.testTag("space_open_devices_button")
+                        ) {
+                            Text("Open Devices")
+                        }
+                    }
+                }
+            } else if (selectedDevice.pairState != PairState.PAIRED) {
                 Spacer(modifier = Modifier.height(18.dp))
                 AppleGroupedSection {
                     Column(

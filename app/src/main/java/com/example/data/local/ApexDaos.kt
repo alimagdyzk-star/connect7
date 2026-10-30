@@ -30,11 +30,24 @@ interface DeviceDao {
     @Query("UPDATE paired_devices SET isReachable = :reachable, lastSeenEpochMs = :timestamp WHERE deviceId = :deviceId")
     suspend fun updateReachability(deviceId: String, reachable: Boolean, timestamp: Long = System.currentTimeMillis())
 
+    @Query("UPDATE paired_devices SET isReachable = 0")
+    suspend fun markAllDisconnectedOnStartup()
+
     @Query("UPDATE paired_devices SET batteryLevel = :level, isCharging = :charging WHERE deviceId = :deviceId")
     suspend fun updateBattery(deviceId: String, level: Int, charging: Boolean)
 
-    @Query("UPDATE paired_devices SET isMediaPlaying = :playing, mediaVolume = :volume, mediaTitle = :title, mediaArtist = :artist WHERE deviceId = :deviceId")
-    suspend fun updateMediaState(deviceId: String, playing: Boolean, volume: Int, title: String, artist: String)
+    @Query("UPDATE paired_devices SET mediaPlayerName = :player, isMediaPlaying = :playing, mediaVolume = :volume, mediaTitle = :title, mediaArtist = :artist WHERE deviceId = :deviceId")
+    suspend fun updateMediaState(
+        deviceId: String,
+        player: String,
+        playing: Boolean,
+        volume: Int,
+        title: String,
+        artist: String
+    )
+
+    @Query("UPDATE paired_devices SET remoteCommandsJson = :commandsJson WHERE deviceId = :deviceId")
+    suspend fun updateRemoteCommands(deviceId: String, commandsJson: String)
 
     @Query("UPDATE paired_devices SET lastClipboardSnippet = :snippet WHERE deviceId = :deviceId")
     suspend fun updateClipboard(deviceId: String, snippet: String)

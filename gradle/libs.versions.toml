@@ -40,6 +40,9 @@ secretsGradlePlugin = "2.0.1"
 googleServices = "4.5.0"
 credentials = "1.5.0"
 googleid = "1.1.1"
+bouncycastle = "1.80"
+jsch = "2.27.0"
+
 
 
 [libraries]
@@ -94,6 +97,10 @@ firebase-auth = { group = "com.google.firebase", name = "firebase-auth" }
 androidx-credentials = { group = "androidx.credentials", name = "credentials", version.ref = "credentials" }
 androidx-credentials-play-services = { group = "androidx.credentials", name = "credentials-play-services-auth", version.ref = "credentials" }
 googleid = { group = "com.google.android.libraries.identity.googleid", name = "googleid", version.ref = "googleid" }
+bouncycastle-pkix = { group = "org.bouncycastle", name = "bcpkix-jdk18on", version.ref = "bouncycastle" }
+bouncycastle-prov = { group = "org.bouncycastle", name = "bcprov-jdk18on", version.ref = "bouncycastle" }
+mwiede-jsch = { group = "com.github.mwiede", name = "jsch", version.ref = "jsch" }
+
 
 
 [plugins]

@@ -42,7 +42,7 @@ class ApexTypeConverters {
         DeviceNoteEntity::class,
         TransferRecordEntity::class
     ],
-    version = 1,
+    version = 2,
     exportSchema = false
 )
 @TypeConverters(ApexTypeConverters::class)

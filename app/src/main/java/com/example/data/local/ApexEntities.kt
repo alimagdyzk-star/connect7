@@ -35,8 +35,8 @@ enum class AttachmentAvailability {
 data class PairedDeviceEntity(
     @PrimaryKey val deviceId: String,
     val deviceName: String,
-    val deviceType: String, // "desktop", "laptop", "phone", "tablet", "tv"
-    val platformOs: String, // "Linux (KDE Plasma)", "Windows 11", "macOS", "Android 15"
+    val deviceType: String,
+    val platformOs: String,
     val ipAddress: String,
     val tcpPort: Int = 1716,
     val protocolVersion: Int = 8,
@@ -44,19 +44,23 @@ data class PairedDeviceEntity(
     val isReachable: Boolean = false,
     val certificateFingerprint: String,
     val verificationCode: String,
-    val batteryLevel: Int = 100,
+    val pinnedCertificateBase64: String? = null,
+    val batteryLevel: Int = -1, // -1 means peer hasn't reported battery yet
     val isCharging: Boolean = false,
-    val supportsRemoteFs: Boolean = true,
+    val supportsRemoteFs: Boolean = false,
+    val supportsKdeSftp: Boolean = false,
+    val supportsApexVfs: Boolean = false,
     val supportsUploadFs: Boolean = true,
-    val supportsSpaceSync: Boolean = true,
+    val supportsSpaceSync: Boolean = false,
     val supportsMousepad: Boolean = true,
     val supportsMpris: Boolean = true,
+    val mediaPlayerName: String = "",
     val mediaTitle: String = "",
     val mediaArtist: String = "",
     val isMediaPlaying: Boolean = false,
-    val mediaVolume: Int = 70,
+    val mediaVolume: Int = 50,
     val lastClipboardSnippet: String = "",
-    val isLoopbackNode: Boolean = false,
+    val remoteCommandsJson: String = "[]", // Real commands received via `kdeconnect.runcommand`
     val lastSeenEpochMs: Long = System.currentTimeMillis()
 )
 
@@ -65,7 +69,7 @@ data class PairedDeviceEntity(
     indices = [Index(value = ["deviceId", "createdAtEpochMs"])]
 )
 data class DeviceMessageEntity(
-    @PrimaryKey val messageUuid: String, // Stable UUID for duplicate detection & retry idempotency
+    @PrimaryKey val messageUuid: String,
     val deviceId: String,
     val senderDeviceId: String,
     val isOutgoing: Boolean,
@@ -88,13 +92,13 @@ data class DeviceMessageEntity(
     indices = [Index(value = ["deviceId", "updatedAtEpochMs"])]
 )
 data class DeviceNoteEntity(
-    @PrimaryKey val noteUuid: String, // Stable UUID across devices
+    @PrimaryKey val noteUuid: String,
     val deviceId: String,
     val authorDeviceId: String,
     val title: String,
     val content: String,
     val isPinned: Boolean = false,
-    val isDeletedTombstone: Boolean = false, // Enables deterministic deletion sync across reconnects
+    val isDeletedTombstone: Boolean = false,
     val revision: Int = 1,
     val syncStatus: SyncStatus = SyncStatus.QUEUED_OFFLINE,
     val createdAtEpochMs: Long = System.currentTimeMillis(),
@@ -111,10 +115,10 @@ data class TransferRecordEntity(
     val fileName: String,
     val remotePath: String,
     val localPathOrUri: String?,
-    val direction: String, // "DOWNLOAD" or "UPLOAD"
+    val direction: String,
     val totalBytes: Long,
     val transferredBytes: Long,
-    val status: String, // "IN_PROGRESS", "COMPLETED", "CANCELLED", "FAILED"
+    val status: String,
     val sha256Checksum: String? = null,
     val errorMessage: String? = null,
     val startedAtEpochMs: Long = System.currentTimeMillis()

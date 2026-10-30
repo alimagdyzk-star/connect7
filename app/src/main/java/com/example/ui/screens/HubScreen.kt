@@ -25,10 +25,10 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
-import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentPasteGo
+import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Folder
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Link
@@ -37,12 +37,15 @@ import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Radar
+import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
+import androidx.compose.material.icons.filled.Smartphone
 import androidx.compose.material.icons.filled.UploadFile
 import androidx.compose.material.icons.outlined.Pause
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -64,6 +67,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.R
@@ -95,6 +99,7 @@ fun HubScreen(
     onAcceptPair: (String) -> Unit,
     onUnpair: (String) -> Unit,
     onScanLan: (String?) -> Unit,
+    onRenameLocalNode: (String) -> Unit,
     onNavigateTab: (ApexDestination) -> Unit,
     onRingDevice: () -> Unit,
     onPushClipboard: () -> Unit,
@@ -104,9 +109,11 @@ fun HubScreen(
     modifier: Modifier = Modifier
 ) {
     var showAddByIpDialog by remember { mutableStateOf(false) }
+    var showRenameDialog by remember { mutableStateOf(false) }
     var showSecuritySheet by remember { mutableStateOf(false) }
     var showDiagnostics by remember { mutableStateOf(false) }
     var customIpInput by remember { mutableStateOf("") }
+    var renameDraft by remember(uiState.localNodeName) { mutableStateOf(uiState.localNodeName) }
 
     val quickShareLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
@@ -120,14 +127,21 @@ fun HubScreen(
     val pairedDevices = devices.filter { it.pairState == PairState.PAIRED }
     val nearbyUnpaired = devices.filter { it.pairState != PairState.PAIRED }
 
+    val primaryLocalIp = uiState.localIpAddresses.firstOrNull()
+    val localEndpointText = if (primaryLocalIp != null) {
+        "$primaryLocalIp:${uiState.activeTcpPort}"
+    } else {
+        "Port ${uiState.activeTcpPort} • Connect Wi-Fi"
+    }
+
     if (showAddByIpDialog) {
         AlertDialog(
             onDismissRequest = { showAddByIpDialog = false },
-            title = { Text("Connect to IP Address") },
+            title = { Text("Connect via IP Address") },
             text = {
                 Column {
                     Text(
-                        text = "Enter the local IP or Tailscale address of a KDE Connect device (port 1716).",
+                        text = "Enter the local Wi-Fi IP or Tailscale IP of a computer or phone running KDE Connect or ApexConnect (default port 1716).",
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
@@ -135,7 +149,7 @@ fun HubScreen(
                     OutlinedTextField(
                         value = customIpInput,
                         onValueChange = { customIpInput = it },
-                        placeholder = { Text("192.168.1.50") },
+                        placeholder = { Text("192.168.1.50 or 192.168.1.50:1716") },
                         singleLine = true,
                         shape = RoundedCornerShape(12.dp),
                         modifier = Modifier
@@ -147,10 +161,13 @@ fun HubScreen(
             confirmButton = {
                 Button(
                     onClick = {
-                        onScanLan(customIpInput)
-                        customIpInput = ""
-                        showAddByIpDialog = false
+                        if (customIpInput.isNotBlank()) {
+                            onScanLan(customIpInput.trim())
+                            customIpInput = ""
+                            showAddByIpDialog = false
+                        }
                     },
+                    shape = CircleShape,
                     modifier = Modifier.testTag("confirm_add_ip_button")
                 ) {
                     Text("Connect")
@@ -164,36 +181,85 @@ fun HubScreen(
         )
     }
 
-    if (showSecuritySheet && selectedDevice != null) {
+    if (showRenameDialog) {
+        AlertDialog(
+            onDismissRequest = { showRenameDialog = false },
+            title = { Text("Device Name") },
+            text = {
+                Column {
+                    Text(
+                        text = "This name is broadcast to nearby KDE Connect and ApexConnect devices on your Wi-Fi network.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+                    OutlinedTextField(
+                        value = renameDraft,
+                        onValueChange = { renameDraft = it },
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .testTag("rename_device_input")
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        onRenameLocalNode(renameDraft)
+                        showRenameDialog = false
+                    },
+                    shape = CircleShape
+                ) {
+                    Text("Save")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showRenameDialog = false }) {
+                    Text(stringResource(R.string.action_cancel))
+                }
+            }
+        )
+    }
+
+    if (showSecuritySheet) {
         AlertDialog(
             onDismissRequest = { showSecuritySheet = false },
-            title = { Text("Encryption & Identity") },
+            title = { Text("TLS Encryption & X.509 Identity") },
             text = {
-                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
-                        text = "This Phone: ${uiState.localNodeName}",
+                        text = "This Device: ${uiState.localNodeName}",
                         style = MaterialTheme.typography.titleSmall
                     )
                     Text(
-                        text = "Local Key: ${uiState.localFingerprint}",
+                        text = "Endpoint: $localEndpointText",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(
+                        text = "X.509 SHA-256: ${uiState.localFingerprint}",
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                    Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = "Peer: ${selectedDevice.deviceName} (${selectedDevice.ipAddress}:${selectedDevice.tcpPort})",
-                        style = MaterialTheme.typography.titleSmall
-                    )
-                    Text(
-                        text = "Verification Code: ${selectedDevice.verificationCode}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary
-                    )
-                    Text(
-                        text = "Peer SHA-256: ${selectedDevice.certificateFingerprint}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    if (selectedDevice != null) {
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Text(
+                            text = "Peer: ${selectedDevice.deviceName} (${selectedDevice.ipAddress}:${selectedDevice.tcpPort})",
+                            style = MaterialTheme.typography.titleSmall
+                        )
+                        Text(
+                            text = "Pairing Verification Key: ${selectedDevice.verificationCode}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                        Text(
+                            text = "Peer SHA-256: ${selectedDevice.certificateFingerprint}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             },
             confirmButton = {
@@ -213,25 +279,18 @@ fun HubScreen(
             contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 32.dp),
             verticalArrangement = Arrangement.spacedBy(20.dp)
         ) {
-            // 1. Apple Large Title + Subtle Top Actions (Scan & Add IP)
+            // 1. Apple Large Title + Scan & Connect by IP Pills
             item {
                 Row(
                     modifier = Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Column {
-                        Text(
-                            text = "Devices",
-                            style = MaterialTheme.typography.displaySmall,
-                            color = MaterialTheme.colorScheme.onBackground
-                        )
-                        Text(
-                            text = uiState.localNodeName,
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
+                    Text(
+                        text = "Devices",
+                        style = MaterialTheme.typography.displaySmall,
+                        color = MaterialTheme.colorScheme.onBackground
+                    )
 
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                         Surface(
@@ -247,15 +306,23 @@ fun HubScreen(
                                 modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Icon(
-                                    imageVector = Icons.Filled.Radar,
-                                    contentDescription = "Scan LAN",
-                                    tint = MaterialTheme.colorScheme.primary,
-                                    modifier = Modifier.size(17.dp)
-                                )
+                                if (uiState.isScanningLan) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(15.dp),
+                                        strokeWidth = 2.dp,
+                                        color = MaterialTheme.colorScheme.primary
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Filled.Radar,
+                                        contentDescription = "Scan Wi-Fi",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(17.dp)
+                                    )
+                                }
                                 Spacer(modifier = Modifier.width(5.dp))
                                 Text(
-                                    text = if (uiState.isScanningLan) "Scanning…" else "Scan",
+                                    text = if (uiState.isScanningLan) "Scanning" else "Scan",
                                     style = MaterialTheme.typography.labelLarge,
                                     color = MaterialTheme.colorScheme.primary
                                 )
@@ -285,48 +352,109 @@ fun HubScreen(
                 }
             }
 
-            // 2. Active Device Continuity Card (Clean Apple Settings Profile Card)
-            if (selectedDevice != null) {
+            // 2. This Phone Identity Platter (Real Local IP, Port, Editable Name & X.509 Cert)
+            item {
+                AppleGroupedSection(modifier = Modifier.testTag("local_identity_card")) {
+                    AppleGroupedRow(
+                        title = uiState.localNodeName,
+                        subtitle = "This Phone • $localEndpointText",
+                        leadingIcon = Icons.Filled.Smartphone,
+                        iconTint = AppleBlue,
+                        showChevron = false,
+                        onClick = { showRenameDialog = true },
+                        trailingContent = {
+                            Row(verticalAlignment = Alignment.CenterVertically) {
+                                IconButton(
+                                    onClick = { showRenameDialog = true },
+                                    modifier = Modifier.size(34.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.Edit,
+                                        contentDescription = "Rename device",
+                                        tint = MaterialTheme.colorScheme.primary,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                                IconButton(
+                                    onClick = { showSecuritySheet = true },
+                                    modifier = Modifier.size(34.dp)
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Filled.Info,
+                                        contentDescription = "Local certificate info",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(18.dp)
+                                    )
+                                }
+                            }
+                        }
+                    )
+                }
+            }
+
+            // 3. Empty LAN State (Zero fake devices — real AirDrop / KDE Connect radar card!)
+            if (selectedDevice == null) {
+                item {
+                    AppleEmptyDiscoveryPlatter(
+                        isScanning = uiState.isScanningLan,
+                        localEndpoint = localEndpointText,
+                        onScanWifi = { onScanLan(null) },
+                        onConnectByIp = { showAddByIpDialog = true }
+                    )
+                }
+            } else {
+                // Active Real Peer Hero Card (with authentic incoming vs outgoing pairing flow)
                 item {
                     ActiveAppleDeviceHeroCard(
                         device = selectedDevice,
                         onShowSecurityInfo = { showSecuritySheet = true },
                         onRequestPair = { onRequestPair(selectedDevice.deviceId) },
-                        onAcceptPair = { onAcceptPair(selectedDevice.deviceId) }
+                        onAcceptPair = { onAcceptPair(selectedDevice.deviceId) },
+                        onDeclineOrUnpair = { onUnpair(selectedDevice.deviceId) }
                     )
                 }
+            }
 
-                // 3. Primary Continuity Workspaces: Remote Files + Chat & Notes
-                item {
-                    Column {
-                        AppleSectionHeader(title = "Continuity Workspace")
-                        Row(
-                            modifier = Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            AppleWorkspaceWidgetCard(
-                                title = "Remote Files",
-                                subtitle = if (selectedDevice.supportsRemoteFs) "Browse & transfer" else "Not supported",
-                                icon = Icons.Filled.Folder,
-                                iconColor = AppleBlue,
-                                onClick = { onNavigateTab(ApexDestination.REMOTE_FILES) },
-                                testTag = "spotlight_remote_files_card",
-                                modifier = Modifier.weight(1f)
-                            )
-                            AppleWorkspaceWidgetCard(
-                                title = "Chat & Notes",
-                                subtitle = "Messages & board",
-                                icon = Icons.AutoMirrored.Filled.Chat,
-                                iconColor = AppleGreen,
-                                onClick = { onNavigateTab(ApexDestination.DEVICE_SPACE) },
-                                testTag = "spotlight_device_space_card",
-                                modifier = Modifier.weight(1f)
-                            )
-                        }
+            // 4. Continuity Workspace (Remote Files + Persistent Chat & Notes)
+            item {
+                Column {
+                    AppleSectionHeader(title = "Continuity Workspace")
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        AppleWorkspaceWidgetCard(
+                            title = "Remote Files",
+                            subtitle = when {
+                                selectedDevice == null -> "Connect a device first"
+                                selectedDevice.supportsRemoteFs -> "SFTP & LAN browser"
+                                else -> "Share files to peer"
+                            },
+                            icon = Icons.Filled.Folder,
+                            iconColor = AppleBlue,
+                            onClick = { onNavigateTab(ApexDestination.REMOTE_FILES) },
+                            testTag = "spotlight_remote_files_card",
+                            modifier = Modifier.weight(1f)
+                        )
+                        AppleWorkspaceWidgetCard(
+                            title = "Chat & Notes",
+                            subtitle = if (selectedDevice != null) {
+                                "Synced with ${selectedDevice.deviceName}"
+                            } else {
+                                "Messages & shared board"
+                            },
+                            icon = Icons.AutoMirrored.Filled.Chat,
+                            iconColor = AppleGreen,
+                            onClick = { onNavigateTab(ApexDestination.DEVICE_SPACE) },
+                            testTag = "spotlight_device_space_card",
+                            modifier = Modifier.weight(1f)
+                        )
                     }
                 }
+            }
 
-                // 4. Control Center Style 2x2 Quick Actions (AirDrop Share, Clipboard, Trackpad, Find My)
+            // 5. Control Center Quick Actions & Now Playing (shown when a peer is selected)
+            if (selectedDevice != null) {
                 item {
                     Column {
                         AppleSectionHeader(
@@ -341,7 +469,7 @@ fun HubScreen(
                             ) {
                                 AppleControlCenterTile(
                                     label = "Send File",
-                                    caption = "AirDrop over LAN",
+                                    caption = "KDE Share over TLS",
                                     icon = Icons.Filled.UploadFile,
                                     tint = AppleIndigo,
                                     onClick = { quickShareLauncher.launch(arrayOf("*/*")) },
@@ -350,7 +478,7 @@ fun HubScreen(
                                 )
                                 AppleControlCenterTile(
                                     label = "Clipboard",
-                                    caption = "Universal Paste",
+                                    caption = "Push to Peer",
                                     icon = Icons.Filled.ContentPasteGo,
                                     tint = AppleTeal,
                                     onClick = onPushClipboard,
@@ -364,7 +492,7 @@ fun HubScreen(
                             ) {
                                 AppleControlCenterTile(
                                     label = "Trackpad",
-                                    caption = "Cursor & Keyboard",
+                                    caption = "Mouse & Keyboard",
                                     icon = Icons.Filled.Mouse,
                                     tint = AppleOrange,
                                     onClick = { onNavigateTab(ApexDestination.PLUGINS_TOOLS) },
@@ -385,7 +513,6 @@ fun HubScreen(
                     }
                 }
 
-                // 5. Sleek Apple Music / Now Playing Platter (only when paired & supported)
                 if (selectedDevice.pairState == PairState.PAIRED && selectedDevice.supportsMpris) {
                     item {
                         AppleNowPlayingPlatter(
@@ -397,11 +524,11 @@ fun HubScreen(
                 }
             }
 
-            // 6. Inset Grouped List — My Paired Devices
+            // 6. Inset Grouped List — Paired Devices
             if (pairedDevices.isNotEmpty()) {
                 item {
                     Column {
-                        AppleSectionHeader(title = "My Devices")
+                        AppleSectionHeader(title = "My Paired Devices")
                         AppleGroupedSection {
                             pairedDevices.forEachIndexed { index, peer ->
                                 AppleDeviceListRow(
@@ -419,11 +546,11 @@ fun HubScreen(
                 }
             }
 
-            // 7. Inset Grouped List — Other Nearby Devices (AirDrop / Bluetooth style)
+            // 7. Inset Grouped List — Discovered Unpaired Devices on Wi-Fi
             if (nearbyUnpaired.isNotEmpty()) {
                 item {
                     Column {
-                        AppleSectionHeader(title = "Other Devices Nearby")
+                        AppleSectionHeader(title = "Other Devices on Wi-Fi")
                         AppleGroupedSection {
                             nearbyUnpaired.forEachIndexed { index, peer ->
                                 AppleDeviceListRow(
@@ -431,9 +558,7 @@ fun HubScreen(
                                     isSelected = peer.deviceId == uiState.selectedDeviceId,
                                     onSelect = { onSelectDevice(peer.deviceId, null) },
                                     onActionClick = {
-                                        if (peer.pairState == PairState.PAIR_REQUESTED_BY_PEER ||
-                                            peer.pairState == PairState.PAIR_REQUESTED_BY_US
-                                        ) {
+                                        if (peer.pairState == PairState.PAIR_REQUESTED_BY_PEER) {
                                             onAcceptPair(peer.deviceId)
                                         } else {
                                             onRequestPair(peer.deviceId)
@@ -449,35 +574,33 @@ fun HubScreen(
                 }
             }
 
-            // 8. Clean Collapsible Diagnostics Row (No raw terminal clutter on main screen!)
+            // 8. Collapsible Live Network Log
             if (protocolEvents.isNotEmpty()) {
                 item {
-                    Column {
-                        AppleGroupedSection {
-                            AppleGroupedRow(
-                                title = "Connection Activity",
-                                subtitle = "${protocolEvents.size} recent encrypted events",
-                                leadingIcon = Icons.Filled.Info,
-                                iconTint = Color(0xFF8E8E93),
-                                trailingText = if (showDiagnostics) "Hide" else "Show",
-                                onClick = { showDiagnostics = !showDiagnostics }
-                            )
-                            AnimatedVisibility(visible = showDiagnostics) {
-                                Column(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .padding(start = 16.dp, end = 16.dp, bottom = 14.dp)
-                                ) {
-                                    AppleInsetDivider()
-                                    Spacer(modifier = Modifier.height(8.dp))
-                                    protocolEvents.take(5).forEach { log ->
-                                        Text(
-                                            text = log,
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            modifier = Modifier.padding(vertical = 2.dp)
-                                        )
-                                    }
+                    AppleGroupedSection {
+                        AppleGroupedRow(
+                            title = "Network Activity",
+                            subtitle = protocolEvents.first(),
+                            leadingIcon = Icons.Filled.Info,
+                            iconTint = Color(0xFF8E8E93),
+                            trailingText = if (showDiagnostics) "Hide" else "Logs",
+                            onClick = { showDiagnostics = !showDiagnostics }
+                        )
+                        AnimatedVisibility(visible = showDiagnostics) {
+                            Column(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(start = 16.dp, end = 16.dp, bottom = 14.dp)
+                            ) {
+                                AppleInsetDivider()
+                                Spacer(modifier = Modifier.height(8.dp))
+                                protocolEvents.take(8).forEach { log ->
+                                    Text(
+                                        text = log,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(vertical = 2.dp)
+                                    )
                                 }
                             }
                         }
@@ -489,11 +612,97 @@ fun HubScreen(
 }
 
 @Composable
+private fun AppleEmptyDiscoveryPlatter(
+    isScanning: Boolean,
+    localEndpoint: String,
+    onScanWifi: () -> Unit,
+    onConnectByIp: () -> Unit
+) {
+    AppleGroupedSection(modifier = Modifier.testTag("empty_lan_discovery_card")) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 22.dp, vertical = 26.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(64.dp)
+                    .clip(CircleShape)
+                    .background(AppleBlue.copy(alpha = 0.12f)),
+                contentAlignment = Alignment.Center
+            ) {
+                if (isScanning) {
+                    CircularProgressIndicator(
+                        color = AppleBlue,
+                        strokeWidth = 2.5.dp,
+                        modifier = Modifier.size(30.dp)
+                    )
+                } else {
+                    Icon(
+                        imageVector = Icons.Filled.Radar,
+                        contentDescription = null,
+                        tint = AppleBlue,
+                        modifier = Modifier.size(32.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+
+            Text(
+                text = "Looking for Devices on Wi-Fi",
+                style = MaterialTheme.typography.titleLarge,
+                color = MaterialTheme.colorScheme.onSurface,
+                textAlign = TextAlign.Center
+            )
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            Text(
+                text = "Open KDE Connect on your PC, Mac, or Linux desktop — or ApexConnect on another phone — connected to the same Wi-Fi network ($localEndpoint).",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+
+            Spacer(modifier = Modifier.height(18.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Button(
+                    onClick = onScanWifi,
+                    shape = CircleShape,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(Icons.Filled.Radar, contentDescription = null, modifier = Modifier.size(17.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Scan Wi-Fi")
+                }
+
+                FilledTonalButton(
+                    onClick = onConnectByIp,
+                    shape = CircleShape,
+                    modifier = Modifier.weight(1f)
+                ) {
+                    Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(17.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text("Enter IP")
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun ActiveAppleDeviceHeroCard(
     device: PairedDeviceEntity,
     onShowSecurityInfo: () -> Unit,
     onRequestPair: () -> Unit,
-    onAcceptPair: () -> Unit
+    onAcceptPair: () -> Unit,
+    onDeclineOrUnpair: () -> Unit
 ) {
     AppleGroupedSection {
         Column(modifier = Modifier.padding(18.dp)) {
@@ -531,9 +740,16 @@ private fun ActiveAppleDeviceHeroCard(
                         )
                         Spacer(modifier = Modifier.height(2.dp))
                         val statusLabel = when {
-                            device.pairState != PairState.PAIRED -> "Not Paired • ${device.ipAddress}"
-                            device.isReachable -> "Connected • TLS Encrypted"
-                            else -> "Offline • Sync Queued"
+                            device.pairState == PairState.PAIR_REQUESTED_BY_PEER ->
+                                "Incoming Pair Request • ${device.ipAddress}"
+                            device.pairState == PairState.PAIR_REQUESTED_BY_US ->
+                                "Waiting for ${device.deviceName} to Accept…"
+                            device.pairState != PairState.PAIRED ->
+                                "Discovered on LAN • ${device.ipAddress}"
+                            device.isReachable ->
+                                "Connected • Mutual TLS (${device.ipAddress})"
+                            else ->
+                                "Offline • Last seen at ${device.ipAddress}"
                         }
                         Text(
                             text = statusLabel,
@@ -572,38 +788,56 @@ private fun ActiveAppleDeviceHeroCard(
                     ) {
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
-                                text = "Verification Code",
+                                text = "SHA-256 Verification Key",
                                 style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                             Text(
-                                text = device.verificationCode,
+                                text = device.verificationCode.ifBlank { "Negotiating TLS…" },
                                 style = MaterialTheme.typography.titleMedium,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
                         }
-                        if (device.pairState == PairState.PAIR_REQUESTED_BY_PEER ||
-                            device.pairState == PairState.PAIR_REQUESTED_BY_US
-                        ) {
-                            Button(
-                                onClick = onAcceptPair,
-                                shape = CircleShape,
-                                modifier = Modifier.testTag("accept_pair_banner_button")
-                            ) {
-                                Icon(Icons.Filled.CheckCircle, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Confirm")
+                        when (device.pairState) {
+                            PairState.PAIR_REQUESTED_BY_PEER -> {
+                                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    TextButton(onClick = onDeclineOrUnpair) {
+                                        Text("Decline", color = AppleRed)
+                                    }
+                                    Button(
+                                        onClick = onAcceptPair,
+                                        shape = CircleShape,
+                                        modifier = Modifier.testTag("accept_pair_banner_button")
+                                    ) {
+                                        Icon(Icons.Filled.CheckCircle, contentDescription = null, modifier = Modifier.size(16.dp))
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Text("Accept")
+                                    }
+                                }
                             }
-                        } else {
-                            Button(
-                                onClick = onRequestPair,
-                                shape = CircleShape,
-                                modifier = Modifier.testTag("request_pair_banner_button")
-                            ) {
-                                Icon(Icons.Filled.Link, contentDescription = null, modifier = Modifier.size(16.dp))
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text("Pair")
+                            PairState.PAIR_REQUESTED_BY_US -> {
+                                FilledTonalButton(
+                                    onClick = onRequestPair,
+                                    shape = CircleShape,
+                                    modifier = Modifier.testTag("resend_pair_banner_button")
+                                ) {
+                                    Icon(Icons.Filled.Schedule, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Resend")
+                                }
                             }
+                            PairState.UNPAIRED -> {
+                                Button(
+                                    onClick = onRequestPair,
+                                    shape = CircleShape,
+                                    modifier = Modifier.testTag("request_pair_banner_button")
+                                ) {
+                                    Icon(Icons.Filled.Link, contentDescription = null, modifier = Modifier.size(16.dp))
+                                    Spacer(modifier = Modifier.width(6.dp))
+                                    Text("Pair")
+                                }
+                            }
+                            PairState.PAIRED -> Unit
                         }
                     }
                 }
@@ -756,14 +990,17 @@ private fun AppleNowPlayingPlatter(
                     Spacer(modifier = Modifier.width(12.dp))
                     Column {
                         Text(
-                            text = device.mediaTitle.ifBlank { "Not Playing" },
+                            text = device.mediaTitle.ifBlank { "No Active Media" },
                             style = MaterialTheme.typography.titleMedium,
                             color = MaterialTheme.colorScheme.onSurface,
                             maxLines = 1,
                             overflow = TextOverflow.Ellipsis
                         )
+                        val playerLabel = device.mediaArtist.ifBlank {
+                            device.mediaPlayerName.ifBlank { device.deviceName }
+                        }
                         Text(
-                            text = "${device.mediaArtist.ifBlank { device.deviceName }} • Volume ${device.mediaVolume}%",
+                            text = "$playerLabel • Volume ${device.mediaVolume}%",
                             style = MaterialTheme.typography.bodySmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             maxLines = 1,
@@ -811,16 +1048,13 @@ private fun AppleDeviceListRow(
         title = device.deviceName,
         subtitle = buildString {
             append(
-                when {
-                    device.pairState == PairState.PAIR_REQUESTED_BY_PEER ||
-                        device.pairState == PairState.PAIR_REQUESTED_BY_US -> "Confirm ${device.verificationCode}"
-                    device.pairState != PairState.PAIRED -> "Available to Pair"
-                    device.isReachable -> "Connected"
-                    else -> "Offline"
+                when (device.pairState) {
+                    PairState.PAIR_REQUESTED_BY_PEER -> "Accept Code ${device.verificationCode}"
+                    PairState.PAIR_REQUESTED_BY_US -> "Waiting for Peer (${device.verificationCode})"
+                    PairState.UNPAIRED -> "Available on ${device.ipAddress}"
+                    PairState.PAIRED -> if (device.isReachable) "Connected • ${device.ipAddress}" else "Offline"
                 }
             )
-            append(" • ")
-            append(device.platformOs.substringBefore("(").trim())
         },
         leadingIcon = deviceIconForType(device.deviceType),
         iconTint = iconColor,
@@ -846,13 +1080,22 @@ private fun AppleDeviceListRow(
                             Text("Unpair", color = AppleRed, style = MaterialTheme.typography.labelLarge)
                         }
                     }
-                    PairState.PAIR_REQUESTED_BY_PEER, PairState.PAIR_REQUESTED_BY_US -> {
+                    PairState.PAIR_REQUESTED_BY_PEER -> {
                         FilledTonalButton(
                             onClick = onActionClick,
                             shape = CircleShape,
                             modifier = Modifier.testTag("accept_pair_btn_${device.deviceId}")
                         ) {
                             Text("Accept")
+                        }
+                    }
+                    PairState.PAIR_REQUESTED_BY_US -> {
+                        FilledTonalButton(
+                            onClick = onActionClick,
+                            shape = CircleShape,
+                            modifier = Modifier.testTag("resend_pair_btn_${device.deviceId}")
+                        ) {
+                            Text("Pending")
                         }
                     }
                     PairState.UNPAIRED -> {

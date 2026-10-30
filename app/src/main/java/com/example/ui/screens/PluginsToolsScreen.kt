@@ -124,13 +124,38 @@ fun PluginsToolsScreen(
 
             if (selectedDevice == null || selectedDevice.pairState != PairState.PAIRED) {
                 item {
-                    AppleGroupedSection {
-                        Text(
-                            text = "Pair with a device on the Devices tab to unlock Magic Trackpad, Now Playing, Universal Clipboard, and Shortcuts.",
-                            style = MaterialTheme.typography.bodyMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(20.dp)
-                        )
+                    AppleGroupedSection(modifier = Modifier.testTag("tools_no_device_card")) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(26.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally
+                        ) {
+                            AppleSquircleIcon(
+                                icon = Icons.Filled.Mouse,
+                                tintColor = AppleOrange,
+                                sizeDp = 46
+                            )
+                            Spacer(modifier = Modifier.height(14.dp))
+                            Text(
+                                text = "Pair a Device to Unlock Controls",
+                                style = MaterialTheme.typography.titleLarge
+                            )
+                            Spacer(modifier = Modifier.height(6.dp))
+                            Text(
+                                text = "Connect to a KDE Connect computer or ApexConnect phone on Wi-Fi to use Magic Trackpad, Media Controls, Universal Clipboard, and Remote Shortcuts.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Spacer(modifier = Modifier.height(16.dp))
+                            Button(
+                                onClick = onBackToHub,
+                                shape = CircleShape,
+                                modifier = Modifier.testTag("tools_open_devices_button")
+                            ) {
+                                Text("Open Devices")
+                            }
+                        }
                     }
                 }
             } else {

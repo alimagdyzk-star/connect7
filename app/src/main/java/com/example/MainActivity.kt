@@ -212,12 +212,19 @@ fun ApexConnectApp(viewModel: ApexViewModel) {
                 }
 
                 Column(modifier = Modifier.fillMaxSize()) {
+                    val localIpSummary = uiState.localIpAddresses.firstOrNull()
+                        ?.let { "$it:${uiState.activeTcpPort}" }
+                        ?: "Port ${uiState.activeTcpPort}"
+
                     // Compact Dynamic-Island-inspired top device switcher capsule
                     ActiveDeviceSelectorStrip(
                         devices = devices,
                         selectedDeviceId = uiState.selectedDeviceId,
+                        localIpSummary = localIpSummary,
+                        isScanning = uiState.isScanningLan,
                         onSelectDevice = { id -> viewModel.selectDevice(id) },
-                        onToggleReachability = { id -> viewModel.togglePeerReachability(id) }
+                        onReconnectDevice = { id -> viewModel.reconnectPeer(id) },
+                        onScanNetwork = { viewModel.scanLanDevices(null) }
                     )
 
                     // AirDrop-style transfer progress platter
@@ -237,6 +244,7 @@ fun ApexConnectApp(viewModel: ApexViewModel) {
                                 onAcceptPair = { id -> viewModel.acceptPairing(id) },
                                 onUnpair = { id -> viewModel.unpairDevice(id) },
                                 onScanLan = { ip -> viewModel.scanLanDevices(ip) },
+                                onRenameLocalNode = { name -> viewModel.renameLocalNode(name) },
                                 onNavigateTab = { dest -> viewModel.selectTab(dest) },
                                 onRingDevice = { viewModel.ringPairedDevice() },
                                 onPushClipboard = { viewModel.pushCurrentClipboardOrText(null) },

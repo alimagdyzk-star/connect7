@@ -340,11 +340,67 @@ fun AppleSegmentedControl(
 fun ActiveDeviceSelectorStrip(
     devices: List<PairedDeviceEntity>,
     selectedDeviceId: String,
+    localIpSummary: String,
+    isScanning: Boolean,
     onSelectDevice: (String) -> Unit,
-    onToggleReachability: (String) -> Unit,
+    onReconnectDevice: (String) -> Unit,
+    onScanNetwork: () -> Unit,
     modifier: Modifier = Modifier
 ) {
-    if (devices.isEmpty()) return
+    if (devices.isEmpty()) {
+        Row(
+            modifier = modifier
+                .fillMaxWidth()
+                .padding(horizontal = 20.dp, vertical = 6.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            Surface(
+                shape = CircleShape,
+                color = MaterialTheme.colorScheme.surface,
+                shadowElevation = 0.8.dp,
+                modifier = Modifier
+                    .clip(CircleShape)
+                    .clickable(onClick = onScanNetwork)
+                    .testTag("active_device_capsule")
+            ) {
+                Row(
+                    modifier = Modifier.padding(horizontal = 12.dp, vertical = 7.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(if (isScanning) MaterialTheme.colorScheme.primary else AppleGreen)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = if (isScanning) "Scanning Wi-Fi…" else "Ready on $localIpSummary",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                }
+            }
+
+            IconButton(
+                onClick = onScanNetwork,
+                modifier = Modifier
+                    .size(36.dp)
+                    .testTag("toggle_reachability_button")
+            ) {
+                Icon(
+                    imageVector = Icons.Outlined.Wifi,
+                    contentDescription = "Scan Wi-Fi network",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(19.dp)
+                )
+            }
+        }
+        return
+    }
 
     var menuExpanded by remember { mutableStateOf(false) }
     val selected = devices.firstOrNull { it.deviceId == selectedDeviceId } ?: devices.first()
@@ -414,6 +470,7 @@ fun ActiveDeviceSelectorStrip(
             ) {
                 devices.forEach { peer ->
                     val isCurrent = peer.deviceId == selected.deviceId
+                    val batterySuffix = if (peer.batteryLevel in 0..100) " • ${peer.batteryLevel}%" else ""
                     DropdownMenuItem(
                         text = {
                             Column {
@@ -424,8 +481,8 @@ fun ActiveDeviceSelectorStrip(
                                 Text(
                                     text = when {
                                         peer.pairState != PairState.PAIRED -> "Unpaired • ${peer.ipAddress}"
-                                        peer.isReachable -> "Connected • ${peer.batteryLevel}%"
-                                        else -> "Offline • Queuing"
+                                        peer.isReachable -> "Connected$batterySuffix"
+                                        else -> "Offline • ${peer.ipAddress}"
                                     },
                                     style = MaterialTheme.typography.bodySmall,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -457,44 +514,46 @@ fun ActiveDeviceSelectorStrip(
             }
         }
 
-        // Right-hand subtle battery + online/offline pill
+        // Right-hand battery (only if reported by remote peer) + reconnect button
         Row(
             verticalAlignment = Alignment.CenterVertically,
             horizontalArrangement = Arrangement.spacedBy(4.dp)
         ) {
-            Surface(
-                shape = CircleShape,
-                color = MaterialTheme.colorScheme.surface,
-                shadowElevation = 0.5.dp
-            ) {
-                Row(
-                    modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                    verticalAlignment = Alignment.CenterVertically
+            if (selected.batteryLevel in 0..100) {
+                Surface(
+                    shape = CircleShape,
+                    color = MaterialTheme.colorScheme.surface,
+                    shadowElevation = 0.5.dp
                 ) {
-                    Icon(
-                        imageVector = if (selected.isCharging) Icons.Filled.BatteryChargingFull else Icons.Filled.BatteryStd,
-                        contentDescription = "Battery",
-                        tint = AppleGreen,
-                        modifier = Modifier.size(15.dp)
-                    )
-                    Spacer(modifier = Modifier.width(3.dp))
-                    Text(
-                        text = "${selected.batteryLevel}%",
-                        style = MaterialTheme.typography.labelMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = if (selected.isCharging) Icons.Filled.BatteryChargingFull else Icons.Filled.BatteryStd,
+                            contentDescription = "Battery",
+                            tint = AppleGreen,
+                            modifier = Modifier.size(15.dp)
+                        )
+                        Spacer(modifier = Modifier.width(3.dp))
+                        Text(
+                            text = "${selected.batteryLevel}%",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
                 }
             }
 
             IconButton(
-                onClick = { onToggleReachability(selected.deviceId) },
+                onClick = { onReconnectDevice(selected.deviceId) },
                 modifier = Modifier
                     .size(36.dp)
                     .testTag("toggle_reachability_button")
             ) {
                 Icon(
                     imageVector = if (selected.isReachable) Icons.Outlined.Wifi else Icons.Outlined.WifiOff,
-                    contentDescription = "Toggle connection mode",
+                    contentDescription = "Refresh peer connection",
                     tint = if (selected.isReachable) MaterialTheme.colorScheme.primary else AppleRed,
                     modifier = Modifier.size(19.dp)
                 )

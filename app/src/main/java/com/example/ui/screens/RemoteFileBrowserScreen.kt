@@ -230,8 +230,10 @@ fun RemoteFileBrowserScreen(
                     AppleFilesStatusPlatter(
                         icon = Icons.Filled.WarningAmber,
                         tint = AppleOrange,
-                        title = "No Device Selected",
-                        body = "Choose a paired device from the capsule above to browse its shared folders."
+                        title = "No Paired Device Active",
+                        body = "Scan your Wi-Fi network on the Devices tab and pair with a PC, Mac, or phone to browse its shared folders.",
+                        actionLabel = "Open Devices",
+                        onAction = onBackToHub
                     )
                 }
 

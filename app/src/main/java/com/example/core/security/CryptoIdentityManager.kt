@@ -2,24 +2,50 @@ package com.example.core.security
 
 import android.content.Context
 import android.os.Build
+import org.bouncycastle.asn1.x500.X500NameBuilder
+import org.bouncycastle.asn1.x500.style.BCStyle
+import org.bouncycastle.cert.jcajce.JcaX509CertificateConverter
+import org.bouncycastle.cert.jcajce.JcaX509v3CertificateBuilder
+import org.bouncycastle.jce.provider.BouncyCastleProvider
+import org.bouncycastle.operator.jcajce.JcaContentSignerBuilder
+import java.io.ByteArrayInputStream
 import java.io.File
+import java.math.BigInteger
+import java.net.Socket
 import java.security.KeyFactory
+import java.security.KeyPair
 import java.security.KeyPairGenerator
+import java.security.KeyStore
 import java.security.MessageDigest
 import java.security.PrivateKey
 import java.security.PublicKey
+import java.security.SecureRandom
+import java.security.cert.CertificateFactory
+import java.security.cert.X509Certificate
 import java.security.spec.PKCS8EncodedKeySpec
 import java.security.spec.X509EncodedKeySpec
+import java.util.Date
 import java.util.UUID
+import javax.net.ssl.KeyManagerFactory
+import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLSocket
+import javax.net.ssl.X509TrustManager
 
 /**
- * Manages the persistent KDE Connect node identity (`deviceId`, `deviceName`) and RSA-2048 keypair
- * used to compute deterministic SHA-256 pairing verification codes between two devices, matching
- * `SslHelper.getVerificationKey(certA, certB)` in KDE Connect.
+ * Authentic KDE Connect `SslHelper` & Cryptographic Identity Manager.
+ *
+ * Generates a persistent RSA-2048 keypair and a self-signed X.509v3 certificate (`CN=<deviceId>, O=KDE, OU=KDE Connect`)
+ * compatible with genuine KDE Connect desktop/mobile apps (Linux Plasma, Windows, macOS, Android),
+ * upgrades raw TCP sockets to mutual-authenticated TLS (`SSLSocket`), and computes exact SHA-256
+ * pairing verification codes from peer X.509 certificates.
  */
-class CryptoIdentityManager(private val context: Context) {
+class CryptoIdentityManager(
+    private val context: Context,
+    private val profilePrefix: String = ""
+) {
 
-    private val prefs = context.getSharedPreferences("apexconnect_identity_prefs", Context.MODE_PRIVATE)
+    private val prefs = context.getSharedPreferences("${profilePrefix}apexconnect_identity_prefs", Context.MODE_PRIVATE)
+    private val bcProvider = BouncyCastleProvider()
 
     val localDeviceId: String by lazy {
         val existing = prefs.getString(KEY_DEVICE_ID, null)
@@ -43,26 +69,107 @@ class CryptoIdentityManager(private val context: Context) {
             prefs.edit().putString(KEY_DEVICE_NAME, value.trim().ifBlank { "Android Phone" }).apply()
         }
 
-    val publicKeyBytes: ByteArray by lazy {
-        ensureKeyPair().first.encoded
+    private val keyAndCertificate: Triple<PublicKey, PrivateKey, X509Certificate> by lazy {
+        ensureKeyAndCertificate()
     }
 
+    val localCertificate: X509Certificate
+        get() = keyAndCertificate.third
+
+    val publicKeyBytes: ByteArray
+        get() = localCertificate.encoded
+
     val localFingerprintFormatted: String by lazy {
-        formatSha256Hex(sha256(publicKeyBytes))
+        formatSha256Hex(sha256(localCertificate.encoded))
     }
 
     /**
-     * Computes the symmetric KDE Connect 8-character hex pairing verification code from two
-     * public keys/certificates sorted lexicographically so both peers display the exact same string.
+     * Upgrades an existing connected TCP `Socket` to an encrypted `SSLSocket` using our X.509
+     * KDE Connect identity certificate.
+     *
+     * Note on KDE Connect's inverted TLS role convention:
+     * - When WE opened the TCP socket to a discovered peer (we are TCP client), KDE Connect expects
+     *   us to act as TLS SERVER (`useClientMode = false`, `needClientAuth = true`).
+     * - When a peer connected to OUR TCP port 1716 (we are TCP server), KDE Connect expects us to
+     *   act as TLS CLIENT (`useClientMode = true`).
      */
-    fun computePairingVerificationCode(remotePublicKeyOrId: ByteArray): String {
-        val a = publicKeyBytes
-        val b = remotePublicKeyOrId
-        val aHex = bytesToHex(a)
-        val bHex = bytesToHex(b)
+    fun convertToTlsSocket(
+        rawSocket: Socket,
+        useClientMode: Boolean,
+        requireClientCert: Boolean = true
+    ): SSLSocket {
+        val sslContext = createSslContext()
+        val hostStr = rawSocket.inetAddress?.hostAddress ?: "127.0.0.1"
+        val sslSocket = sslContext.socketFactory.createSocket(
+            rawSocket,
+            hostStr,
+            rawSocket.port,
+            true
+        ) as SSLSocket
+
+        sslSocket.useClientMode = useClientMode
+        val supportedProtocols = sslSocket.supportedProtocols.filter {
+            it == "TLSv1.3" || it == "TLSv1.2"
+        }
+        if (supportedProtocols.isNotEmpty()) {
+            sslSocket.enabledProtocols = supportedProtocols.toTypedArray()
+        }
+
+        if (!useClientMode) {
+            sslSocket.wantClientAuth = true
+            sslSocket.needClientAuth = requireClientCert
+        }
+
+        sslSocket.soTimeout = 12_000
+        sslSocket.startHandshake()
+        sslSocket.soTimeout = 0 // Persistent keep-alive link after handshake completes
+        return sslSocket
+    }
+
+    fun createTlsSocketFactory(): javax.net.ssl.SSLSocketFactory = createSslContext().socketFactory
+
+    fun createTlsServerSocketFactory(): javax.net.ssl.SSLServerSocketFactory =
+        createSslContext().serverSocketFactory
+
+    private fun createSslContext(): SSLContext {
+        val (_, privKey, cert) = keyAndCertificate
+        val keyStore = KeyStore.getInstance(KeyStore.getDefaultType()).apply {
+            load(null, null)
+            setKeyEntry("kdeconnect", privKey, charArrayOf(), arrayOf(cert))
+        }
+        val kmf = KeyManagerFactory.getInstance(KeyManagerFactory.getDefaultAlgorithm()).apply {
+            init(keyStore, charArrayOf())
+        }
+
+        // KDE Connect TOFU / Pinning TrustManager: accepts X.509 self-signed peer certs during TLS
+        // handshake so we can inspect & verify the peer's exact X.509 certificate bytes for pairing
+        // or match against the pinned certificate stored in Room (`PairedDeviceEntity`).
+        val trustManager = object : X509TrustManager {
+            override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) = Unit
+            override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) = Unit
+            override fun getAcceptedIssuers(): Array<X509Certificate> = emptyArray()
+        }
+
+        return SSLContext.getInstance("TLS").apply {
+            init(kmf.keyManagers, arrayOf(trustManager), SecureRandom())
+        }
+    }
+
+    /**
+     * Computes the exact KDE Connect 8-character hex pairing verification code from the two peers'
+     * public keys/X.509 certificates sorted lexicographically (`SslHelper.getVerificationKey`).
+     */
+    fun computePairingVerificationCode(remotePublicKeyOrCert: ByteArray): String {
+        val a = localCertificate.publicKey.encoded
+        val b = try {
+            val peerCert = parseCertificate(remotePublicKeyOrCert)
+            peerCert.publicKey.encoded
+        } catch (_: Exception) {
+            remotePublicKeyOrCert
+        }
 
         val digest = MessageDigest.getInstance("SHA-256")
-        if (aHex >= bHex) {
+        if (compareByteArraysLexicographically(a, b) >= 0) {
             digest.update(a)
             digest.update(b)
         } else {
@@ -70,33 +177,83 @@ class CryptoIdentityManager(private val context: Context) {
             digest.update(a)
         }
         val hash = digest.digest()
-        return bytesToHex(hash).take(8).uppercase().chunked(4).joinToString(" - ")
+        return bytesToHex(hash).take(8).uppercase().chunked(4).joinToString(" ")
     }
 
-    private fun ensureKeyPair(): Pair<PublicKey, PrivateKey> {
-        val pubFile = File(context.filesDir, "identity_rsa.pub")
-        val privFile = File(context.filesDir, "identity_rsa.key")
+    private fun compareByteArraysLexicographically(a: ByteArray, b: ByteArray): Int {
+        val minLen = minOf(a.size, b.size)
+        for (i in 0 until minLen) {
+            val ua = a[i].toInt() and 0xFF
+            val ub = b[i].toInt() and 0xFF
+            if (ua != ub) return ua - ub
+        }
+        return a.size - b.size
+    }
 
-        if (pubFile.exists() && privFile.exists()) {
+    fun parseCertificate(derBytes: ByteArray): X509Certificate {
+        val cf = CertificateFactory.getInstance("X.509")
+        return cf.generateCertificate(ByteArrayInputStream(derBytes)) as X509Certificate
+    }
+
+    private fun ensureKeyAndCertificate(): Triple<PublicKey, PrivateKey, X509Certificate> {
+        val pubFile = File(context.filesDir, "${profilePrefix}kdeconnect_rsa.pub")
+        val privFile = File(context.filesDir, "${profilePrefix}kdeconnect_rsa.key")
+        val certFile = File(context.filesDir, "${profilePrefix}kdeconnect_x509.der")
+
+        if (pubFile.exists() && privFile.exists() && certFile.exists()) {
             return try {
                 val kf = KeyFactory.getInstance("RSA")
                 val pub = kf.generatePublic(X509EncodedKeySpec(pubFile.readBytes()))
                 val priv = kf.generatePrivate(PKCS8EncodedKeySpec(privFile.readBytes()))
-                pub to priv
+                val cert = parseCertificate(certFile.readBytes())
+                Triple(pub, priv, cert)
             } catch (_: Exception) {
-                generateAndStoreKeyPair(pubFile, privFile)
+                generateAndStoreCertificate(pubFile, privFile, certFile)
             }
         }
-        return generateAndStoreKeyPair(pubFile, privFile)
+        return generateAndStoreCertificate(pubFile, privFile, certFile)
     }
 
-    private fun generateAndStoreKeyPair(pubFile: File, privFile: File): Pair<PublicKey, PrivateKey> {
-        val generator = KeyPairGenerator.getInstance("RSA")
-        generator.initialize(2048)
-        val pair = generator.generateKeyPair()
+    private fun generateAndStoreCertificate(
+        pubFile: File,
+        privFile: File,
+        certFile: File
+    ): Triple<PublicKey, PrivateKey, X509Certificate> {
+        val keyGen = KeyPairGenerator.getInstance("RSA")
+        keyGen.initialize(2048, SecureRandom())
+        val pair: KeyPair = keyGen.generateKeyPair()
+
+        val nameBuilder = X500NameBuilder(BCStyle.INSTANCE).apply {
+            addRDN(BCStyle.CN, localDeviceId)
+            addRDN(BCStyle.OU, "KDE Connect")
+            addRDN(BCStyle.O, "KDE")
+        }
+        val subjectAndIssuer = nameBuilder.build()
+        val now = System.currentTimeMillis()
+        val notBefore = Date(now - 86_400_000L * 365L)
+        val notAfter = Date(now + 86_400_000L * 3650L) // 10-year validity matching KDE Connect
+
+        val certBuilder = JcaX509v3CertificateBuilder(
+            subjectAndIssuer,
+            BigInteger.valueOf(now),
+            notBefore,
+            notAfter,
+            subjectAndIssuer,
+            pair.public
+        )
+        val signer = JcaContentSignerBuilder("SHA256WithRSAEncryption")
+            .setProvider(bcProvider)
+            .build(pair.private)
+
+        val holder = certBuilder.build(signer)
+        val cert: X509Certificate = JcaX509CertificateConverter()
+            .setProvider(bcProvider)
+            .getCertificate(holder)
+
         pubFile.writeBytes(pair.public.encoded)
         privFile.writeBytes(pair.private.encoded)
-        return pair.public to pair.private
+        certFile.writeBytes(cert.encoded)
+        return Triple(pair.public, pair.private, cert)
     }
 
     companion object {
