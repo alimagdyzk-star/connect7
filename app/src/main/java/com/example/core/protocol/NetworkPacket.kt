@@ -4,7 +4,7 @@ import org.json.JSONArray
 import org.json.JSONObject
 
 /**
- * KDE Connect Wire Protocol v8 NetworkPacket implementation.
+ * KDE Connect Wire Protocol NetworkPacket implementation (compatible with Protocol v7 & v8).
  *
  * Encapsulates JSON-lines packet metadata (`id`, `type`, `body`, `payloadSize`, `payloadTransferInfo`)
  * exchanged over TLS/LAN sockets, extended with explicit packet types for Remote File Browsing
@@ -39,7 +39,7 @@ data class NetworkPacket(
     fun hasPayload(): Boolean = (payloadSize ?: -1L) > 0L && payloadTransferInfo != null
 
     /**
-     * Serializes the packet into a newline-delimited UTF-8 JSON frame per KDE Connect Protocol v8.
+     * Serializes the packet into a newline-delimited UTF-8 JSON frame per KDE Connect wire spec.
      */
     fun serialize(): String {
         val root = JSONObject()
@@ -54,7 +54,11 @@ data class NetworkPacket(
     }
 
     companion object {
-        const val PROTOCOL_VERSION = 8
+        /**
+         * Advertise Protocol Version 7 so official KDE Connect v7 AND v8 peers negotiate deterministic
+         * X.509 RSA public-key SHA-256 verification without clock-skew pairing rejections.
+         */
+        const val PROTOCOL_VERSION = 7
 
         // Core KDE Connect Packet Types
         const val TYPE_IDENTITY = "kdeconnect.identity"
@@ -66,7 +70,10 @@ data class NetworkPacket(
         const val TYPE_CLIPBOARD = "kdeconnect.clipboard"
         const val TYPE_CLIPBOARD_CONNECT = "kdeconnect.clipboard.connect"
         const val TYPE_SHARE_REQUEST = "kdeconnect.share.request"
+        const val TYPE_SHARE_REQUEST_UPDATE = "kdeconnect.share.request.update"
         const val TYPE_MOUSEPAD_REQUEST = "kdeconnect.mousepad.request"
+        const val TYPE_MOUSEPAD_ECHO = "kdeconnect.mousepad.echo"
+        const val TYPE_MOUSEPAD_KEYBOARDSTATE = "kdeconnect.mousepad.keyboardstate"
         const val TYPE_MPRIS = "kdeconnect.mpris"
         const val TYPE_MPRIS_REQUEST = "kdeconnect.mpris.request"
         const val TYPE_RUNCOMMAND = "kdeconnect.runcommand"
@@ -99,7 +106,10 @@ data class NetworkPacket(
             TYPE_CLIPBOARD,
             TYPE_CLIPBOARD_CONNECT,
             TYPE_SHARE_REQUEST,
+            TYPE_SHARE_REQUEST_UPDATE,
             TYPE_MOUSEPAD_REQUEST,
+            TYPE_MOUSEPAD_ECHO,
+            TYPE_MOUSEPAD_KEYBOARDSTATE,
             TYPE_MPRIS,
             TYPE_MPRIS_REQUEST,
             TYPE_RUNCOMMAND,

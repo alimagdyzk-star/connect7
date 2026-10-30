@@ -18,9 +18,11 @@ import androidx.compose.material.icons.automirrored.filled.Chat
 import androidx.compose.material.icons.automirrored.outlined.Chat
 import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.Folder
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.outlined.Devices
 import androidx.compose.material.icons.outlined.Folder
+import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Tune
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -42,7 +44,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -54,6 +55,7 @@ import com.example.ui.screens.DeviceSpaceScreen
 import com.example.ui.screens.HubScreen
 import com.example.ui.screens.PluginsToolsScreen
 import com.example.ui.screens.RemoteFileBrowserScreen
+import com.example.ui.screens.SettingsScreen
 import com.example.ui.theme.MyApplicationTheme
 
 class MainActivity : ComponentActivity() {
@@ -86,6 +88,11 @@ fun ApexConnectApp(viewModel: ApexViewModel) {
     val transfers by viewModel.transfersForSelectedDevice.collectAsStateWithLifecycle()
     val activeTransfer by viewModel.activeTransfer.collectAsStateWithLifecycle()
     val protocolEvents by viewModel.protocolEvents.collectAsStateWithLifecycle()
+
+    val diagnosticEntries by viewModel.diagnosticEntries.collectAsStateWithLifecycle()
+    val isLoggingEnabled by viewModel.isLoggingEnabled.collectAsStateWithLifecycle()
+    val isVerbosePacketsEnabled by viewModel.isVerbosePacketsEnabled.collectAsStateWithLifecycle()
+    val sharedSafTrees by viewModel.sharedSafTrees.collectAsStateWithLifecycle()
 
     val snackbarHostState = remember { SnackbarHostState() }
 
@@ -127,6 +134,13 @@ fun ApexConnectApp(viewModel: ApexViewModel) {
                 selectedIcon = Icons.Filled.Tune,
                 unselectedIcon = Icons.Outlined.Tune,
                 testTag = "nav_tab_tools"
+            ),
+            NavTabSpec(
+                destination = ApexDestination.SETTINGS,
+                label = "Settings",
+                selectedIcon = Icons.Filled.Settings,
+                unselectedIcon = Icons.Outlined.Settings,
+                testTag = "nav_tab_settings"
             )
         )
     }
@@ -165,7 +179,8 @@ fun ApexConnectApp(viewModel: ApexViewModel) {
                                     label = {
                                         Text(
                                             text = tab.label,
-                                            style = MaterialTheme.typography.labelMedium
+                                            style = MaterialTheme.typography.labelSmall,
+                                            maxLines = 1
                                         )
                                     },
                                     colors = NavigationBarItemDefaults.colors(
@@ -267,6 +282,10 @@ fun ApexConnectApp(viewModel: ApexViewModel) {
                                 onDownloadFileToSaf = { entry, uri -> viewModel.downloadRemoteFileToSaf(entry, uri) },
                                 onDownloadAndOpenFile = { ctx, entry -> viewModel.downloadAndOpenRemoteFile(ctx, entry) },
                                 onUploadFileToCurrentDir = { uri -> viewModel.uploadFileToCurrentRemoteDir(uri) },
+                                onConnectCustomSftp = { host, port, username, password, rootPath ->
+                                    viewModel.connectCustomSftp(host, port, username, password, rootPath)
+                                },
+                                onAddSharedPhoneFolder = { treeUri -> viewModel.addSharedPhoneFolder(treeUri) },
                                 onRequestPair = { id -> viewModel.requestPairing(id) },
                                 onBackToHub = { viewModel.selectTab(ApexDestination.HUB) },
                                 modifier = Modifier.weight(1f)
@@ -305,13 +324,41 @@ fun ApexConnectApp(viewModel: ApexViewModel) {
                                 selectedDevice = selectedDevice,
                                 remoteCommands = viewModel.getRemoteCommands(selectedDevice),
                                 onTouchpadMove = { dx, dy -> viewModel.sendTouchpadDelta(dx, dy) },
+                                onTouchpadScroll = { dy -> viewModel.sendTouchpadScroll(dy) },
                                 onTouchpadClick = { right -> viewModel.sendTouchpadClick(right) },
                                 onSendRemoteKey = { key -> viewModel.sendRemoteKey(key) },
+                                onSendRemoteSpecialKey = { code, label -> viewModel.sendRemoteSpecialKey(code, label) },
                                 onMediaAction = { act, vol -> viewModel.sendMediaCommand(act, vol) },
+                                onRefreshTelemetry = { viewModel.refreshRemoteTelemetry() },
                                 onPushClipboard = { txt -> viewModel.pushCurrentClipboardOrText(txt) },
                                 onExecuteCommand = { cmd -> viewModel.executeRemoteCommand(cmd) },
                                 onRingDevice = { viewModel.ringPairedDevice() },
                                 onSendPing = { msg -> viewModel.sendPing(msg) },
+                                onBackToHub = { viewModel.selectTab(ApexDestination.HUB) },
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+
+                        ApexDestination.SETTINGS -> {
+                            val logSize = remember(diagnosticEntries.size) {
+                                viewModel.getDiagnosticFileSizeBytes()
+                            }
+                            SettingsScreen(
+                                uiState = uiState,
+                                isLoggingEnabled = isLoggingEnabled,
+                                isVerbosePacketsEnabled = isVerbosePacketsEnabled,
+                                diagnosticEntries = diagnosticEntries,
+                                logFileSizeBytes = logSize,
+                                sharedSafTrees = sharedSafTrees,
+                                onToggleLogging = { enabled -> viewModel.setDiagnosticLoggingEnabled(enabled) },
+                                onToggleVerbosePackets = { enabled -> viewModel.setVerbosePacketsEnabled(enabled) },
+                                onExportLogsToSaf = { uri -> viewModel.exportDiagnosticLogsToSafUri(uri) },
+                                onShareLogsFile = { ctx -> viewModel.shareDiagnosticLogsFile(ctx) },
+                                onCopyLogs = { viewModel.copyDiagnosticLogsToClipboard() },
+                                onClearLogs = { viewModel.clearDiagnosticLogs() },
+                                onAddSharedFolder = { treeUri -> viewModel.addSharedPhoneFolder(treeUri) },
+                                onRemoveSharedFolder = { alias -> viewModel.removeSharedPhoneFolder(alias) },
+                                onRenameDevice = { name -> viewModel.renameLocalNode(name) },
                                 onBackToHub = { viewModel.selectTab(ApexDestination.HUB) },
                                 modifier = Modifier.weight(1f)
                             )

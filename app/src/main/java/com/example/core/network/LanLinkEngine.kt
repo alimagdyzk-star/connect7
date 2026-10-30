@@ -5,23 +5,32 @@ import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.net.wifi.WifiManager
 import android.webkit.MimeTypeMap
+import com.example.core.diagnostics.DiagnosticLogger
+import com.example.core.diagnostics.LogCategory
 import com.example.core.protocol.NetworkPacket
 import com.example.core.security.CryptoIdentityManager
 import com.example.core.security.PathValidator
+import com.example.core.security.SafSharedFoldersManager
 import com.jcraft.jsch.ChannelSftp
 import com.jcraft.jsch.JSch
 import com.jcraft.jsch.Session
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeout
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
+import java.io.ByteArrayOutputStream
 import java.io.File
+import java.io.InputStream
 import java.io.InputStreamReader
 import java.io.OutputStream
 import java.io.OutputStreamWriter
@@ -33,8 +42,10 @@ import java.net.InetSocketAddress
 import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
+import java.security.MessageDigest
 import java.security.cert.X509Certificate
 import java.util.Properties
+import java.util.UUID
 import java.util.Vector
 import java.util.concurrent.ConcurrentHashMap
 import javax.net.ssl.SSLSocket
@@ -47,7 +58,8 @@ data class RemoteFileEntry(
     val lastModifiedEpochMs: Long,
     val mimeType: String,
     val isReadable: Boolean = true,
-    val isWritable: Boolean = true
+    val isWritable: Boolean = true,
+    val sftpRealPath: String? = null
 )
 
 data class RemoteCommandItem(
@@ -57,26 +69,31 @@ data class RemoteCommandItem(
 )
 
 /**
- * Stores dynamic SFTP credentials negotiated over TLS when a real KDE Connect peer responds with
- * `kdeconnect.sftp` (`ip`, `port`, `user`, `password`, `multiPaths` / `path`).
+ * Stores dynamic SFTP credentials negotiated over TLS (`kdeconnect.sftp`) OR configured manually
+ * for OpenSSH / SFTP desktop workstations.
  */
 data class SftpSessionCredentials(
-    val host: String,
+    val primaryHost: String,
+    val fallbackHost: String? = null,
     val port: Int,
     val username: String,
     val password: String,
-    val rootPath: String
+    val rootPath: String,
+    val multiPaths: List<String> = emptyList(),
+    val pathNames: List<String> = emptyList(),
+    val isManualSsh: Boolean = false
 )
 
 /**
- * Active encrypted TLS session with a real KDE Connect peer on the LAN.
+ * Active encrypted TLS session with a real KDE Connect / ApexConnect peer on the LAN.
  */
 class ActiveTlsPeerSession(
     val deviceId: String,
     val ipAddress: String,
     val tcpPort: Int,
     val sslSocket: SSLSocket,
-    val peerCertificate: X509Certificate
+    val peerCertificate: X509Certificate,
+    val establishedAtMs: Long = System.currentTimeMillis()
 ) {
     private val writer = OutputStreamWriter(sslSocket.outputStream, Charsets.UTF_8)
     private val writeLock = Any()
@@ -88,30 +105,29 @@ class ActiveTlsPeerSession(
         }
     }
 
+    fun isHealthy(): Boolean =
+        !sslSocket.isClosed && sslSocket.isConnected && !sslSocket.isOutputShutdown
+
     fun close() {
         runCatching { sslSocket.close() }
     }
 }
 
 /**
- * Authentic KDE Connect Protocol v8 Network Engine:
- * 1. Acquires Android `WifiManager.MulticastLock` so real Wi-Fi UDP discovery packets on 1716 are received.
- * 2. Registers & discovers `_kdeconnect._udp.` via Android `NsdManager` (mDNS / Bonjour / Avahi).
- * 3. Broadcasts & listens on UDP port 1716 (`255.255.255.255` + interface subnet broadcast addresses).
- * 4. Performs the authentic KDE Connect TCP -> Cleartext Identity -> Inverted Mutual TLS (`SSLSocket`)
- *    upgrade and keeps persistent bidirectional encrypted links alive with every connected peer.
- * 5. Connects to real KDE Connect SFTP servers (`kdeconnect.sftp` + `JSch ChannelSftp`) AND supports
- *    direct peer-to-peer `kdeconnect.vfs.*` + `kdeconnect.space.*` between two Android/ApexConnect devices.
+ * Authentic KDE Connect LAN Discovery, Mutual TLS Transport, SFTP Client, and Peer-to-Peer VFS Engine.
  */
 class LanLinkEngine(
     private val context: Context,
     private val identityManager: CryptoIdentityManager,
+    val safFoldersManager: SafSharedFoldersManager,
+    private val logger: DiagnosticLogger,
     private val onPeerConnectedOrUpdated: suspend (
         deviceId: String,
         deviceName: String,
         deviceType: String,
         ipAddress: String,
         tcpPort: Int,
+        protocolVersion: Int,
         certificateBytes: ByteArray?,
         incomingCapabilities: List<String>,
         outgoingCapabilities: List<String>
@@ -120,9 +136,15 @@ class LanLinkEngine(
     private val onPacketReceived: suspend (senderDeviceId: String, packet: NetworkPacket, payloadBytes: ByteArray?) -> Unit
 ) {
     private val engineScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val mdnsResolveMutex = Mutex()
+    private val tcpReadyDeferred = CompletableDeferred<Int>()
 
     @Volatile
     var activeTcpPort: Int = DEFAULT_KDE_PORT
+        private set
+
+    @Volatile
+    var activeUdpPort: Int = 0
         private set
 
     private var tcpServerSocket: ServerSocket? = null
@@ -132,21 +154,16 @@ class LanLinkEngine(
     private var nsdRegistrationListener: NsdManager.RegistrationListener? = null
 
     private val activeSessions = ConcurrentHashMap<String, ActiveTlsPeerSession>()
+    private val connectingPeers = ConcurrentHashMap.newKeySet<String>()
     private val sftpCredentialsByDevice = ConcurrentHashMap<String, SftpSessionCredentials>()
-    private val pendingVfsResponses = ConcurrentHashMap<String, kotlinx.coroutines.CompletableDeferred<NetworkPacket>>()
+    private val pendingVfsResponses = ConcurrentHashMap<String, CompletableDeferred<NetworkPacket>>()
 
-    /**
-     * Authorized root directory on this Android device exported when a paired peer browses OUR files
-     * over `kdeconnect.vfs.*` (contains real subdirectories inside app storage, never exposing private DB/keys).
-     */
     val authorizedVaultRoot: File by lazy {
         File(context.filesDir, "shared_export").apply {
-            if (!exists()) {
-                mkdirs()
-                File(this, "Documents").mkdirs()
-                File(this, "Pictures").mkdirs()
-                File(this, "Downloads").mkdirs()
-            }
+            if (!exists()) mkdirs()
+            File(this, "Documents").mkdirs()
+            File(this, "Pictures").mkdirs()
+            File(this, "Downloads").mkdirs()
         }
     }
 
@@ -158,6 +175,9 @@ class LanLinkEngine(
 
     @Volatile
     private var isStopping: Boolean = false
+
+    val isMulticastLockHeld: Boolean
+        get() = multicastLock?.isHeld == true
 
     fun start() {
         isStopping = false
@@ -172,10 +192,15 @@ class LanLinkEngine(
         }
     }
 
+    suspend fun awaitReady(timeoutMs: Long = 2000L) {
+        runCatching { withTimeout(timeoutMs) { tcpReadyDeferred.await() } }
+    }
+
     fun stop() {
         isStopping = true
         val sessions = activeSessions.values.toList()
         activeSessions.clear()
+        connectingPeers.clear()
         sessions.forEach { it.close() }
         runCatching { tcpServerSocket?.close() }
         runCatching { udpSocket?.close() }
@@ -183,10 +208,36 @@ class LanLinkEngine(
         runCatching {
             if (multicastLock?.isHeld == true) multicastLock?.release()
         }
+        logger.info(LogCategory.SYSTEM, "LanLinkEngine stopped")
     }
 
     fun isSessionActive(deviceId: String): Boolean =
-        activeSessions[deviceId]?.sslSocket?.isClosed == false
+        activeSessions[deviceId]?.isHealthy() == true
+
+    fun hasSftpCredentials(deviceId: String): Boolean =
+        sftpCredentialsByDevice.containsKey(deviceId)
+
+    fun configureManualSftpCredentials(
+        deviceId: String,
+        host: String,
+        port: Int,
+        username: String,
+        password: String,
+        rootPath: String = "/"
+    ) {
+        sftpCredentialsByDevice[deviceId] = SftpSessionCredentials(
+            primaryHost = host.trim(),
+            port = port.coerceIn(1, 65535),
+            username = username.trim(),
+            password = password,
+            rootPath = rootPath.trim().ifBlank { "/" },
+            isManualSsh = true
+        )
+        logger.info(
+            LogCategory.FILES,
+            "Configured manual SFTP/SSH credentials for peer $deviceId -> ${host.trim()}:$port (user=${username.trim()}, root=$rootPath)"
+        )
+    }
 
     fun getLocalLanIpAddresses(): List<String> {
         return runCatching {
@@ -215,11 +266,17 @@ class LanLinkEngine(
                 acquire()
             }
             multicastLock = lock
+            logger.info(
+                LogCategory.DISCOVERY,
+                "WifiManager.MulticastLock acquired=${lock?.isHeld == true}"
+            )
+        }.onFailure { err ->
+            logger.warn(LogCategory.DISCOVERY, "Failed to acquire MulticastLock: ${err.message}")
         }
     }
 
     // =========================================================================
-    // 1. mDNS / NSD (`_kdeconnect._udp.`) DISCOVERY & REGISTRATION
+    // 1. mDNS / NSD (`_kdeconnect._udp.`) DISCOVERY & SEQUENTIAL RESOLUTION
     // =========================================================================
 
     private fun registerMdnsService() {
@@ -231,13 +288,19 @@ class LanLinkEngine(
                 port = activeTcpPort
             }
             val regListener = object : NsdManager.RegistrationListener {
-                override fun onServiceRegistered(info: NsdServiceInfo) = Unit
-                override fun onRegistrationFailed(info: NsdServiceInfo, errorCode: Int) = Unit
+                override fun onServiceRegistered(info: NsdServiceInfo) {
+                    logger.info(LogCategory.DISCOVERY, "mDNS registered '${info.serviceName}' on port $activeTcpPort")
+                }
+                override fun onRegistrationFailed(info: NsdServiceInfo, errorCode: Int) {
+                    logger.warn(LogCategory.DISCOVERY, "mDNS registration failed (code=$errorCode)")
+                }
                 override fun onServiceUnregistered(info: NsdServiceInfo) = Unit
                 override fun onUnregistrationFailed(info: NsdServiceInfo, errorCode: Int) = Unit
             }
             nsdRegistrationListener = regListener
             nsd.registerService(serviceInfo, NsdManager.PROTOCOL_DNS_SD, regListener)
+        }.onFailure { err ->
+            logger.warn(LogCategory.DISCOVERY, "mDNS registerService error: ${err.message}")
         }
     }
 
@@ -245,26 +308,55 @@ class LanLinkEngine(
         runCatching {
             val nsd = context.getSystemService(Context.NSD_SERVICE) as? NsdManager ?: return
             val discListener = object : NsdManager.DiscoveryListener {
-                override fun onDiscoveryStarted(regType: String) = Unit
+                override fun onDiscoveryStarted(regType: String) {
+                    logger.info(LogCategory.DISCOVERY, "mDNS discovery started for $regType")
+                }
                 override fun onServiceFound(service: NsdServiceInfo) {
                     if (service.serviceName == identityManager.localDeviceId) return
-                    nsd.resolveService(service, object : NsdManager.ResolveListener {
-                        override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) = Unit
-                        override fun onServiceResolved(resolved: NsdServiceInfo) {
-                            val host = resolved.host?.hostAddress ?: return
-                            engineScope.launch {
-                                broadcastUdpIdentity(unicastHost = host)
-                            }
+                    engineScope.launch {
+                        // Serialize NsdManager.resolveService calls to avoid FAILURE_ALREADY_ACTIVE (code 3)
+                        mdnsResolveMutex.withLock {
+                            val resolvedDone = CompletableDeferred<Unit>()
+                            runCatching {
+                                nsd.resolveService(service, object : NsdManager.ResolveListener {
+                                    override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {
+                                        logger.warn(
+                                            LogCategory.DISCOVERY,
+                                            "mDNS resolve failed for '${serviceInfo.serviceName}' (code=$errorCode)"
+                                        )
+                                        resolvedDone.complete(Unit)
+                                    }
+
+                                    override fun onServiceResolved(resolved: NsdServiceInfo) {
+                                        val host = resolved.host?.hostAddress
+                                        logger.info(
+                                            LogCategory.DISCOVERY,
+                                            "mDNS resolved peer '${resolved.serviceName}' -> $host:${resolved.port}"
+                                        )
+                                        if (!host.isNullOrBlank() && !host.contains('%')) {
+                                            engineScope.launch {
+                                                broadcastUdpIdentity(unicastHost = host)
+                                            }
+                                        }
+                                        resolvedDone.complete(Unit)
+                                    }
+                                })
+                            }.onFailure { resolvedDone.complete(Unit) }
+                            runCatching { withTimeout(2500L) { resolvedDone.await() } }
                         }
-                    })
+                    }
                 }
                 override fun onServiceLost(service: NsdServiceInfo) = Unit
                 override fun onDiscoveryStopped(serviceType: String) = Unit
-                override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) = Unit
+                override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {
+                    logger.warn(LogCategory.DISCOVERY, "mDNS startDiscovery failed (code=$errorCode)")
+                }
                 override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) = Unit
             }
             nsdDiscoveryListener = discListener
             nsd.discoverServices("_kdeconnect._udp.", NsdManager.PROTOCOL_DNS_SD, discListener)
+        }.onFailure { err ->
+            logger.warn(LogCategory.DISCOVERY, "mDNS discoverServices error: ${err.message}")
         }
     }
 
@@ -280,7 +372,7 @@ class LanLinkEngine(
 
     private suspend fun startTcpListenerRange() = withContext(Dispatchers.IO) {
         var boundServer: ServerSocket? = null
-        for (port in DEFAULT_KDE_PORT..1764) {
+        for (port in DEFAULT_KDE_PORT..MAX_KDE_PORT) {
             boundServer = runCatching {
                 ServerSocket().apply {
                     reuseAddress = true
@@ -294,6 +386,12 @@ class LanLinkEngine(
         }
         tcpServerSocket = boundServer
         activeTcpPort = boundServer.localPort
+        if (!tcpReadyDeferred.isCompleted) tcpReadyDeferred.complete(activeTcpPort)
+
+        logger.info(
+            LogCategory.DISCOVERY,
+            "TCP listener bound on 0.0.0.0:$activeTcpPort (LAN IPs: ${getLocalLanIpAddresses()})"
+        )
 
         engineScope.launch {
             while (isActive && !boundServer.isClosed) {
@@ -312,43 +410,77 @@ class LanLinkEngine(
      * 2. We upgrade the socket to TLS in **TLS CLIENT mode** (`useClientMode = true`).
      */
     private suspend fun handleIncomingPeerTcpConnection(rawSocket: Socket) = withContext(Dispatchers.IO) {
+        val remoteIp = rawSocket.inetAddress?.hostAddress ?: "unknown"
+        var peerIdForCleanup = ""
         runCatching {
             rawSocket.soTimeout = 10_000
-            // CRITICAL: Read byte-by-byte until '\n' without BufferedReader so zero TLS handshake bytes are pre-consumed!
+            rawSocket.keepAlive = true
             val identityLine = readLineUnbuffered(rawSocket.getInputStream()) ?: run {
+                logger.warn(LogCategory.TLS, "Incoming TCP from $remoteIp closed before sending cleartext identity")
                 rawSocket.close()
                 return@withContext
             }
             val identityPacket = NetworkPacket.parse(identityLine)
             if (identityPacket.type != NetworkPacket.TYPE_IDENTITY) {
+                logger.warn(LogCategory.TLS, "Incoming TCP from $remoteIp sent unexpected packet: ${identityPacket.type}")
                 rawSocket.close()
                 return@withContext
             }
 
             val peerDeviceId = identityPacket.getString("deviceId")
+            val peerName = identityPacket.getString("deviceName", "Unknown")
             if (peerDeviceId.isBlank() || peerDeviceId == identityManager.localDeviceId) {
                 rawSocket.close()
                 return@withContext
             }
+            peerIdForCleanup = peerDeviceId
+
+            // Prevent duplicate UDP echo storms from tearing down a healthy session established moments ago
+            val existing = activeSessions[peerDeviceId]
+            if (existing != null && existing.isHealthy() &&
+                (System.currentTimeMillis() - existing.establishedAtMs) < 2500L
+            ) {
+                logger.info(
+                    LogCategory.TLS,
+                    "Ignoring duplicate incoming TCP from '$peerName' ($remoteIp) — healthy TLS link already active"
+                )
+                rawSocket.close()
+                return@withContext
+            }
+
+            logger.logPacket("RECV-TCP-CLEAR", "$peerName@$remoteIp", identityPacket, LogCategory.DISCOVERY)
 
             // Inverted TLS: we accepted TCP connection -> we act as TLS Client (`useClientMode = true`)
             val sslSocket = identityManager.convertToTlsSocket(rawSocket, useClientMode = true)
             val peerCert = sslSocket.session.peerCertificates.firstOrNull() as? X509Certificate
                 ?: throw SecurityException("Peer did not present X.509 certificate during TLS handshake.")
 
+            logger.info(
+                LogCategory.TLS,
+                "Incoming TLS handshake succeeded (role=TLS_CLIENT, proto=${sslSocket.session.protocol}, cipher=${sslSocket.session.cipherSuite}) with '$peerName' ($remoteIp)"
+            )
+
             registerAndListenOnTlsSession(
                 sslSocket = sslSocket,
                 peerCert = peerCert,
                 identityPacket = identityPacket,
-                remoteIp = rawSocket.inetAddress.hostAddress ?: ""
+                remoteIp = remoteIp
             )
-        }.onFailure {
+        }.onFailure { err ->
+            logger.error(
+                LogCategory.TLS,
+                "Incoming TCP/TLS connection from $remoteIp failed",
+                throwable = err
+            )
             runCatching { rawSocket.close() }
+        }
+        if (peerIdForCleanup.isNotBlank()) {
+            connectingPeers.remove(peerIdForCleanup)
         }
     }
 
-    private fun readLineUnbuffered(input: java.io.InputStream, maxBytes: Int = 16_384): String? {
-        val baos = java.io.ByteArrayOutputStream(512)
+    private fun readLineUnbuffered(input: InputStream, maxBytes: Int = 16_384): String? {
+        val baos = ByteArrayOutputStream(512)
         var count = 0
         while (count < maxBytes) {
             val b = input.read()
@@ -369,32 +501,59 @@ class LanLinkEngine(
     // =========================================================================
 
     private suspend fun startUdpDiscoveryListener() = withContext(Dispatchers.IO) {
-        val socket = runCatching {
-            DatagramSocket(null).apply {
-                reuseAddress = true
-                broadcast = true
-                bind(InetSocketAddress(DEFAULT_KDE_PORT))
-            }
-        }.getOrElse {
-            runCatching { DatagramSocket(0).apply { broadcast = true } }.getOrNull()
-        } ?: return@withContext
+        var socket: DatagramSocket? = null
+        // Retry binding UDP 1716 up to 3 times before falling back to an ephemeral port
+        for (attempt in 1..3) {
+            socket = runCatching {
+                DatagramSocket(null).apply {
+                    reuseAddress = true
+                    broadcast = true
+                    bind(InetSocketAddress(DEFAULT_KDE_PORT))
+                }
+            }.getOrNull()
+            if (socket != null) break
+            delay(120)
+        }
+        if (socket == null) {
+            socket = runCatching { DatagramSocket(0).apply { broadcast = true } }.getOrNull()
+        }
+        if (socket == null) {
+            logger.error(LogCategory.DISCOVERY, "Failed to bind any UDP discovery socket!")
+            return@withContext
+        }
 
         udpSocket = socket
-        val buffer = ByteArray(8192)
+        activeUdpPort = socket.localPort
+        logger.info(
+            LogCategory.DISCOVERY,
+            "UDP discovery listener bound on port $activeUdpPort (standard=1716)"
+        )
+
+        val buffer = ByteArray(16_384)
         while (isActive && !socket.isClosed) {
             val datagram = DatagramPacket(buffer, buffer.size)
             val received = runCatching { socket.receive(datagram) }.isSuccess
             if (!received) break
+            val remoteIp = datagram.address?.hostAddress ?: continue
             val raw = String(datagram.data, 0, datagram.length, Charsets.UTF_8)
-            val packet = runCatching { NetworkPacket.parse(raw) }.getOrNull() ?: continue
+            val packet = runCatching { NetworkPacket.parse(raw) }.getOrElse { err ->
+                logger.warn(LogCategory.DISCOVERY, "Malformed UDP packet from $remoteIp: ${err.message}")
+                continue
+            }
             if (packet.type == NetworkPacket.TYPE_IDENTITY) {
                 val peerId = packet.getString("deviceId")
-                val remoteIp = datagram.address.hostAddress ?: continue
+                val peerName = packet.getString("deviceName", "Unknown")
                 if (peerId.isNotBlank() && peerId != identityManager.localDeviceId) {
                     val peerTcpPort = packet.getInt("tcpPort", DEFAULT_KDE_PORT)
-                    if (!isSessionActive(peerId)) {
+                    logger.logPacket("RECV-UDP", "$peerName@$remoteIp:$peerTcpPort", packet, LogCategory.DISCOVERY)
+
+                    if (!isSessionActive(peerId) && connectingPeers.add(peerId)) {
                         engineScope.launch {
-                            initiateOutgoingConnectionToPeer(remoteIp, peerTcpPort, packet)
+                            try {
+                                initiateOutgoingConnectionToPeer(remoteIp, peerTcpPort, packet)
+                            } finally {
+                                connectingPeers.remove(peerId)
+                            }
                         }
                     }
                 }
@@ -403,12 +562,13 @@ class LanLinkEngine(
     }
 
     /**
-     * Broadcasts genuine KDE Connect v8 `kdeconnect.identity` over UDP 1716 to:
+     * Broadcasts KDE Connect `kdeconnect.identity` over UDP 1716 to:
      * - `255.255.255.255`
-     * - Every active Wi-Fi / LAN interface broadcast address (e.g., `192.168.1.255`)
-     * - Optional direct unicast IP entered by the user
+     * - Every active Wi-Fi / LAN IPv4 subnet broadcast address (e.g., `192.168.1.255`)
+     * - Or a direct unicast IP[:port] entered by the user.
      */
     suspend fun broadcastUdpIdentity(unicastHost: String? = null): Boolean = withContext(Dispatchers.IO) {
+        awaitReady(1500L)
         val packet = NetworkPacket.createIdentityPacket(
             deviceId = identityManager.localDeviceId,
             deviceName = identityManager.localDeviceName,
@@ -419,40 +579,71 @@ class LanLinkEngine(
 
         runCatching {
             val (parsedHost, parsedPort) = parseHostAndOptionalPort(unicastHost)
-            DatagramSocket().use { sender ->
-                sender.broadcast = true
-                val targets = linkedSetOf<Pair<InetAddress, Int>>()
-                if (!parsedHost.isNullOrBlank()) {
+            val targets = linkedSetOf<Pair<InetAddress, Int>>()
+            if (!parsedHost.isNullOrBlank()) {
+                targets.add(InetAddress.getByName(parsedHost) to DEFAULT_KDE_PORT)
+                if (parsedPort != DEFAULT_KDE_PORT) {
                     targets.add(InetAddress.getByName(parsedHost) to parsedPort)
-                } else {
-                    targets.add(InetAddress.getByName("255.255.255.255") to DEFAULT_KDE_PORT)
-                    val interfaces = NetworkInterface.getNetworkInterfaces()
-                    while (interfaces != null && interfaces.hasMoreElements()) {
-                        val nif = interfaces.nextElement()
-                        if (!nif.isUp || nif.isLoopback) continue
-                        for (ifAddr in nif.interfaceAddresses) {
-                            ifAddr.broadcast?.let { targets.add(it to DEFAULT_KDE_PORT) }
-                        }
-                    }
                 }
-                for ((address, targetPort) in targets) {
-                    runCatching {
-                        val dgram = DatagramPacket(bytes, bytes.size, address, targetPort)
-                        sender.send(dgram)
+            } else {
+                targets.add(InetAddress.getByName("255.255.255.255") to DEFAULT_KDE_PORT)
+                val interfaces = NetworkInterface.getNetworkInterfaces()
+                while (interfaces != null && interfaces.hasMoreElements()) {
+                    val nif = interfaces.nextElement()
+                    if (!nif.isUp || nif.isLoopback) continue
+                    for (ifAddr in nif.interfaceAddresses) {
+                        ifAddr.broadcast?.let { targets.add(it to DEFAULT_KDE_PORT) }
                     }
                 }
             }
-            // If user entered a direct IP[:port], allow 350ms for UDP callback, then probe TCP directly if needed
+
+            // Send a 2-datagram burst (spaced 260ms apart) so Wi-Fi DTIM power-saving routers don't drop single UDP broadcasts
+            DatagramSocket().use { sender ->
+                sender.broadcast = true
+                repeat(2) { wave ->
+                    for ((address, targetPort) in targets) {
+                        runCatching {
+                            val dgram = DatagramPacket(bytes, bytes.size, address, targetPort)
+                            sender.send(dgram)
+                        }.onFailure { sendErr ->
+                            if (wave == 0) {
+                                logger.warn(
+                                    LogCategory.DISCOVERY,
+                                    "UDP send failed to ${address.hostAddress}:$targetPort — ${sendErr.message}"
+                                )
+                            }
+                        }
+                    }
+                    if (wave == 0) delay(240)
+                }
+            }
+
+            logger.info(
+                LogCategory.DISCOVERY,
+                "Sent UDP identity burst (myTcpPort=$activeTcpPort) to: " +
+                    targets.joinToString { "${it.first.hostAddress}:${it.second}" }
+            )
+
+            // If user entered a direct IP[:port], give the peer 900ms to connect back via standard UDP->TCP
+            // so we receive its full `kdeconnect.identity`, then fall back to direct TCP probe if needed!
             if (!parsedHost.isNullOrBlank()) {
                 engineScope.launch {
-                    delay(350)
-                    val alreadyConnected = activeSessions.values.any { it.ipAddress == parsedHost }
+                    delay(900)
+                    val alreadyConnected = activeSessions.values.any {
+                        it.ipAddress == parsedHost && it.isHealthy()
+                    }
                     if (!alreadyConnected) {
+                        logger.info(
+                            LogCategory.DISCOVERY,
+                            "No UDP callback from $parsedHost after 900ms — attempting direct TCP/TLS probe on $parsedHost:$parsedPort"
+                        )
                         initiateDirectTcpProbe(parsedHost, parsedPort)
                     }
                 }
             }
             true
+        }.onFailure { err ->
+            logger.error(LogCategory.DISCOVERY, "broadcastUdpIdentity failed", err)
         }.getOrDefault(false)
     }
 
@@ -471,20 +662,21 @@ class LanLinkEngine(
     }
 
     /**
-     * When we discover a peer via UDP `kdeconnect.identity` (or direct IP probe):
-     * 1. Open TCP connection to `remoteIp:peerTcpPort`.
-     * 2. Send OUR `kdeconnect.identity` in cleartext first.
-     * 3. Upgrade socket to TLS in **TLS SERVER mode** (`useClientMode = false`, mutual auth).
+     * Outgoing TCP connection to `remoteIp:peerTcpPort`:
+     * 1. Send OUR `kdeconnect.identity` in cleartext first.
+     * 2. Upgrade socket to TLS in **TLS SERVER mode** (`useClientMode = false`, mutual auth).
      */
     suspend fun initiateOutgoingConnectionToPeer(
         remoteIp: String,
         peerTcpPort: Int,
         udpIdentityPacket: NetworkPacket?
     ): Boolean = withContext(Dispatchers.IO) {
+        val rawSocket = Socket()
         runCatching {
-            val rawSocket = Socket()
-            rawSocket.connect(InetSocketAddress(remoteIp, peerTcpPort), 4500)
+            logger.info(LogCategory.TLS, "Opening outgoing TCP connection to $remoteIp:$peerTcpPort…")
+            rawSocket.connect(InetSocketAddress(remoteIp, peerTcpPort), 5000)
             rawSocket.soTimeout = 10_000
+            rawSocket.keepAlive = true
 
             val ourIdentity = NetworkPacket.createIdentityPacket(
                 deviceId = identityManager.localDeviceId,
@@ -501,10 +693,15 @@ class LanLinkEngine(
             val peerCert = sslSocket.session.peerCertificates.firstOrNull() as? X509Certificate
                 ?: throw SecurityException("Remote peer did not present client X.509 certificate.")
 
+            logger.info(
+                LogCategory.TLS,
+                "Outgoing TLS handshake succeeded (role=TLS_SERVER, proto=${sslSocket.session.protocol}, cipher=${sslSocket.session.cipherSuite}) with $remoteIp:$peerTcpPort"
+            )
+
             val effectiveIdentity = udpIdentityPacket ?: run {
                 val cn = extractCommonName(peerCert.subjectX500Principal.name)
                     ?: "kde_peer_${remoteIp.replace('.', '_')}"
-                val stdCaps = JSONArray(
+                val fallbackCaps = JSONArray(
                     listOf(
                         NetworkPacket.TYPE_PAIR,
                         NetworkPacket.TYPE_PING,
@@ -513,8 +710,6 @@ class LanLinkEngine(
                         NetworkPacket.TYPE_MOUSEPAD_REQUEST,
                         NetworkPacket.TYPE_MPRIS,
                         NetworkPacket.TYPE_MPRIS_REQUEST,
-                        NetworkPacket.TYPE_SFTP,
-                        NetworkPacket.TYPE_SFTP_REQUEST,
                         NetworkPacket.TYPE_BATTERY,
                         NetworkPacket.TYPE_BATTERY_REQUEST,
                         NetworkPacket.TYPE_FIND_MY_PHONE,
@@ -526,12 +721,12 @@ class LanLinkEngine(
                     type = NetworkPacket.TYPE_IDENTITY,
                     body = JSONObject().apply {
                         put("deviceId", cn)
-                        put("deviceName", "KDE Connect ($remoteIp)")
+                        put("deviceName", "Device ($remoteIp)")
                         put("deviceType", "desktop")
                         put("protocolVersion", NetworkPacket.PROTOCOL_VERSION)
                         put("tcpPort", peerTcpPort)
-                        put("incomingCapabilities", stdCaps)
-                        put("outgoingCapabilities", stdCaps)
+                        put("incomingCapabilities", fallbackCaps)
+                        put("outgoingCapabilities", fallbackCaps)
                     }
                 )
             }
@@ -543,6 +738,13 @@ class LanLinkEngine(
                 remoteIp = remoteIp
             )
             true
+        }.onFailure { err ->
+            logger.error(
+                LogCategory.TLS,
+                "Outgoing TCP/TLS connection to $remoteIp:$peerTcpPort failed",
+                throwable = err
+            )
+            runCatching { rawSocket.close() }
         }.getOrDefault(false)
     }
 
@@ -562,6 +764,7 @@ class LanLinkEngine(
         val peerName = identityPacket.getString("deviceName", "KDE Connect Device")
         val peerType = identityPacket.getString("deviceType", "desktop")
         val peerPort = identityPacket.getInt("tcpPort", DEFAULT_KDE_PORT)
+        val peerProto = identityPacket.getInt("protocolVersion", NetworkPacket.PROTOCOL_VERSION)
         val inCaps = identityPacket.getStringList("incomingCapabilities")
         val outCaps = identityPacket.getStringList("outgoingCapabilities")
 
@@ -576,12 +779,19 @@ class LanLinkEngine(
         )
         activeSessions[peerId] = session
 
+        logger.info(
+            LogCategory.TLS,
+            "Session registered for '$peerName' (id=$peerId, ip=$remoteIp, proto=v$peerProto)",
+            details = "peerIncomingCaps=$inCaps\npeerOutgoingCaps=$outCaps"
+        )
+
         onPeerConnectedOrUpdated(
             peerId,
             peerName,
             peerType,
             remoteIp,
             peerPort,
+            peerProto,
             peerCert.encoded,
             inCaps,
             outCaps
@@ -594,7 +804,17 @@ class LanLinkEngine(
                 while (isActive && !sslSocket.isClosed) {
                     val line = reader.readLine() ?: break
                     if (line.isBlank()) continue
-                    val packet = runCatching { NetworkPacket.parse(line) }.getOrNull() ?: continue
+                    val packet = runCatching { NetworkPacket.parse(line) }.getOrElse { parseErr ->
+                        logger.warn(LogCategory.TLS, "Ignored invalid JSON packet from $peerName: ${parseErr.message}")
+                        continue
+                    }
+
+                    logger.logPacket(
+                        direction = "RECV-TLS",
+                        peerLabel = "$peerName@$remoteIp",
+                        packet = packet,
+                        category = categorizePacket(packet.type)
+                    )
 
                     // Pull binary payload over TLS if peer attached `payloadTransferInfo.port`,
                     // except `TYPE_VFS_READ_RESPONSE` which streams directly to disk in `downloadViaVfsTls`.
@@ -606,10 +826,12 @@ class LanLinkEngine(
                         }
                     }
 
-                    handleEncryptedSessionPacket(session, packet, payloadBytes)
+                    handleEncryptedSessionPacket(session, peerName, packet, payloadBytes)
                 }
-            } catch (_: Exception) {
-                // Socket closed or reset by peer
+            } catch (e: Exception) {
+                if (!isStopping) {
+                    logger.warn(LogCategory.TLS, "TLS reader loop ended for '$peerName' ($remoteIp): ${e.message}")
+                }
             } finally {
                 if (activeSessions[peerId] === session) {
                     activeSessions.remove(peerId)
@@ -624,31 +846,62 @@ class LanLinkEngine(
 
     private suspend fun handleEncryptedSessionPacket(
         session: ActiveTlsPeerSession,
+        peerName: String,
         packet: NetworkPacket,
         payloadBytes: ByteArray?
     ) {
         when (packet.type) {
-            // Capture real KDE Connect SFTP server credentials when peer starts its SFTP subsystem
             NetworkPacket.TYPE_SFTP -> {
-                val ip = packet.getString("ip", session.ipAddress)
-                val port = packet.getInt("port", 22)
-                val user = packet.getString("user", "kdeconnect")
-                val password = packet.getString("password", "")
-                val multiPaths = packet.getStringList("multiPaths")
-                val rootPath = packet.getString("path").ifBlank { multiPaths.firstOrNull() ?: "/" }
-                if (password.isNotBlank() && port > 0) {
-                    sftpCredentialsByDevice[session.deviceId] = SftpSessionCredentials(
-                        host = ip,
-                        port = port,
-                        username = user,
-                        password = password,
-                        rootPath = rootPath
+                if (packet.body.has("errorMessage")) {
+                    logger.error(
+                        LogCategory.FILES,
+                        "Remote peer '$peerName' reported SFTP error: ${packet.getString("errorMessage")}"
                     )
+                } else {
+                    val rawPacketIp = packet.getString("ip", "")
+                    val port = packet.getInt("port", 22)
+                    val user = packet.getString("user", "kdeconnect")
+                    val password = packet.getString("password", "")
+                    val multiPaths = packet.getStringList("multiPaths")
+                    val pathNames = packet.getStringList("pathNames")
+                    val singlePath = packet.getString("path")
+
+                    // Prefer session.ipAddress (proven working IPv4 socket) over link-local IPv6 strings like fe80::%wlan0
+                    val cleanFallback = rawPacketIp.takeIf { it.isNotBlank() && !it.contains('%') && it != session.ipAddress }
+                    val chosenRoot = when {
+                        singlePath.isNotBlank() -> singlePath
+                        multiPaths.size == 1 -> multiPaths.first()
+                        else -> "/"
+                    }
+                    if (password.isNotBlank() && port > 0) {
+                        sftpCredentialsByDevice[session.deviceId] = SftpSessionCredentials(
+                            primaryHost = session.ipAddress,
+                            fallbackHost = cleanFallback,
+                            port = port,
+                            username = user,
+                            password = password,
+                            rootPath = chosenRoot,
+                            multiPaths = multiPaths,
+                            pathNames = pathNames,
+                            isManualSsh = false
+                        )
+                        logger.info(
+                            LogCategory.FILES,
+                            "Captured KDE Connect SFTP credentials from '$peerName' (${session.ipAddress}:$port, root=$chosenRoot, multiPaths=$multiPaths)"
+                        )
+                    }
                 }
                 onPacketReceived(session.deviceId, packet, payloadBytes)
             }
 
-            // Satisfy awaiting VFS coroutines when browsing another ApexConnect Android peer
+            NetworkPacket.TYPE_SFTP_REQUEST -> {
+                logger.info(
+                    LogCategory.FILES,
+                    "Peer '$peerName' sent kdeconnect.sftp.request (Desktop attempting to mount phone via SFTP)"
+                )
+                onPacketReceived(session.deviceId, packet, payloadBytes)
+            }
+
             NetworkPacket.TYPE_VFS_LIST_RESPONSE,
             NetworkPacket.TYPE_VFS_READ_RESPONSE,
             NetworkPacket.TYPE_VFS_WRITE_RESPONSE -> {
@@ -656,12 +909,12 @@ class LanLinkEngine(
                 pendingVfsResponses.remove(reqId)?.complete(packet)
             }
 
-            // Serve OUR authorized files when another paired ApexConnect peer browses this phone
             NetworkPacket.TYPE_VFS_LIST_REQUEST,
             NetworkPacket.TYPE_VFS_READ_REQUEST,
             NetworkPacket.TYPE_VFS_WRITE_REQUEST -> {
                 val reply = serveLocalVfsRequest(packet, payloadBytes)
                 if (reply != null) {
+                    logger.logPacket("SEND-TLS", peerName, reply, LogCategory.FILES)
                     runCatching { session.sendPacketLine(reply.serialize()) }
                 }
             }
@@ -673,8 +926,33 @@ class LanLinkEngine(
     }
 
     // =========================================================================
-    // 4. SENDING PACKETS & ENCRYPTED PAYLOAD SOCKETS OVER ACTIVE TLS LINK
+    // 4. SENDING PACKETS & ENCRYPTED PAYLOAD SOCKETS (FIREWALL PORTS 1739..1764)
     // =========================================================================
+
+    /**
+     * Low-latency non-blocking write used for 60fps Magic Trackpad cursor movements.
+     */
+    fun sendFastPacketIfConnected(deviceId: String, packet: NetworkPacket): Boolean {
+        val session = activeSessions[deviceId] ?: return false
+        if (!session.isHealthy()) return false
+        return runCatching {
+            session.sendPacketLine(packet.serialize())
+            true
+        }.getOrDefault(false)
+    }
+
+    private fun openPayloadServerSocket(): ServerSocket {
+        for (port in MIN_PAYLOAD_PORT..MAX_KDE_PORT) {
+            val bound = runCatching {
+                ServerSocket().apply {
+                    reuseAddress = true
+                    bind(InetSocketAddress("0.0.0.0", port))
+                }
+            }.getOrNull()
+            if (bound != null) return bound
+        }
+        return ServerSocket(0).apply { reuseAddress = true }
+    }
 
     suspend fun sendPacketToConnectedPeer(
         deviceId: String,
@@ -688,14 +966,22 @@ class LanLinkEngine(
             )
 
         runCatching {
+            var payloadDoneDeferred: CompletableDeferred<Result<Unit>>? = null
             val outboundPacket = if (payloadBytes != null) {
-                val payloadServer = ServerSocket(0).apply { reuseAddress = true }
+                val payloadServer = openPayloadServerSocket()
                 val transferPort = payloadServer.localPort
+                val done = CompletableDeferred<Result<Unit>>()
+                payloadDoneDeferred = done
+
+                logger.info(
+                    LogCategory.FILES,
+                    "Opened TLS payload server on port $transferPort for ${packet.type} (${payloadBytes.size} bytes)"
+                )
 
                 engineScope.launch {
-                    runCatching {
+                    val serveRes = runCatching {
                         payloadServer.use { srv ->
-                            srv.soTimeout = 15_000
+                            srv.soTimeout = 20_000
                             val rawClient = srv.accept()
                             identityManager.convertToTlsSocket(
                                 rawSocket = rawClient,
@@ -716,6 +1002,10 @@ class LanLinkEngine(
                             }
                         }
                     }
+                    serveRes.onFailure { err ->
+                        logger.error(LogCategory.FILES, "Payload transfer server failed on port $transferPort", err)
+                    }
+                    done.complete(serveRes)
                 }
 
                 packet.copy(
@@ -726,7 +1016,22 @@ class LanLinkEngine(
                 packet
             }
 
+            logger.logPacket(
+                direction = "SEND-TLS",
+                peerLabel = "${session.deviceId}@${session.ipAddress}",
+                packet = outboundPacket,
+                category = categorizePacket(outboundPacket.type)
+            )
             session.sendPacketLine(outboundPacket.serialize())
+
+            // Wait for payload socket transfer completion when sending files/images
+            if (payloadDoneDeferred != null) {
+                withTimeout(30_000L) {
+                    payloadDoneDeferred.await().getOrThrow()
+                }
+            }
+        }.onFailure { err ->
+            logger.error(LogCategory.TLS, "Failed sending ${packet.type} to $deviceId", err)
         }
     }
 
@@ -735,7 +1040,7 @@ class LanLinkEngine(
             runCatching {
                 val raw = Socket()
                 raw.connect(InetSocketAddress(remoteIp, port), 8000)
-                raw.soTimeout = 15_000
+                raw.soTimeout = 20_000
                 identityManager.convertToTlsSocket(
                     rawSocket = raw,
                     useClientMode = true,
@@ -743,8 +1048,13 @@ class LanLinkEngine(
                 ).use { tlsSock ->
                     tlsSock.inputStream.readBytes()
                 }
-            }.getOrElse {
-                // Fallback to raw TCP stream if peer's payload socket is non-TLS
+            }.onSuccess { bytes ->
+                logger.info(LogCategory.FILES, "Pulled ${bytes.size} encrypted payload bytes from $remoteIp:$port")
+            }.getOrElse { tlsErr ->
+                logger.warn(
+                    LogCategory.FILES,
+                    "TLS payload pull from $remoteIp:$port failed (${tlsErr.message}) — trying raw TCP fallback"
+                )
                 runCatching {
                     Socket().use { raw ->
                         raw.connect(InetSocketAddress(remoteIp, port), 6000)
@@ -756,7 +1066,7 @@ class LanLinkEngine(
         }
 
     // =========================================================================
-    // 5. REAL REMOTE FILE BROWSING: KDE CONNECT SFTP (JSch) + P2P VFS
+    // 5. REAL REMOTE FILE BROWSING: APEXCONNECT VFS + KDE CONNECT SFTP + SSH/SFTP
     // =========================================================================
 
     suspend fun requestSftpAndBrowseDirectory(
@@ -771,16 +1081,33 @@ class LanLinkEngine(
         }
         val normalizedPath = (pathCheck as PathValidator.ValidationResult.Valid).normalizedRelativePath
 
-        // Path A: Peer speaks ApexConnect VFS directly over our encrypted TLS channel
+        logger.info(
+            LogCategory.FILES,
+            "Browse requested for peer=$deviceId path='$normalizedPath' (apexVfs=$supportsApexVfs, kdeSftp=$supportsKdeSftp, cachedSftp=${sftpCredentialsByDevice.containsKey(deviceId)})"
+        )
+
+        // 1. If manual SSH/SFTP or previously negotiated SFTP credentials already exist for a non-VFS peer, use them!
+        val existingCreds = sftpCredentialsByDevice[deviceId]
+        if (!supportsApexVfs && existingCreds != null) {
+            return@withContext browseViaRealSftp(existingCreds, normalizedPath)
+        }
+
+        // 2. Peer advertises ApexConnect VFS directly over our encrypted TLS channel
         if (supportsApexVfs) {
             return@withContext requestVfsDirectoryOverTls(deviceId, normalizedPath)
         }
 
-        // Path B: Genuine KDE Connect peer advertising `kdeconnect.sftp`
+        // 3. If peer connected via direct TCP probe without UDP capabilities, probe VFS quickly (1.5s) first!
+        val quickVfsAttempt = requestVfsDirectoryOverTls(deviceId, normalizedPath, timeoutMs = 1500L)
+        if (quickVfsAttempt.isSuccess) {
+            logger.info(LogCategory.FILES, "Peer $deviceId responded natively to ApexConnect VFS over TLS!")
+            return@withContext quickVfsAttempt
+        }
+
+        // 4. Genuine KDE Connect peer advertising `kdeconnect.sftp` (e.g. KDE Connect Android)
         if (supportsKdeSftp) {
             var creds = sftpCredentialsByDevice[deviceId]
             if (creds == null) {
-                // Ask remote KDE Connect peer to spin up its SFTP server (`{"startBrowsing": true}`)
                 sendPacketToConnectedPeer(
                     deviceId = deviceId,
                     packet = NetworkPacket(
@@ -788,8 +1115,7 @@ class LanLinkEngine(
                         body = JSONObject().put("startBrowsing", true)
                     )
                 )
-                // Wait up to 3.5s for peer's `kdeconnect.sftp` credentials packet
-                repeat(14) {
+                repeat(16) {
                     delay(250)
                     creds = sftpCredentialsByDevice[deviceId]
                     if (creds != null) return@repeat
@@ -798,7 +1124,7 @@ class LanLinkEngine(
 
             val activeCreds = creds ?: return@withContext Result.failure(
                 UnsupportedOperationException(
-                    "Sent kdeconnect.sftp.request, but remote device did not expose an SFTP server (note: desktop KDE Connect mounts phones as SFTP clients; Android KDE Connect hosts the SFTP server)."
+                    "Remote device did not start an SFTP server. On KDE Connect Android, enable 'Filesystem expose' and add a storage location; on a Windows/Linux/macOS PC, tap 'Connect via SFTP / SSH' below."
                 )
             )
             return@withContext browseViaRealSftp(activeCreds, normalizedPath)
@@ -806,9 +1132,47 @@ class LanLinkEngine(
 
         Result.failure(
             UnsupportedOperationException(
-                "This connected device does not advertise SFTP (`kdeconnect.sftp`) or VFS (`kdeconnect.vfs.list.request`) directory browsing capabilities."
+                "Desktop KDE Connect does not bundle a built-in SFTP server (it only mounts phones). Tap 'Connect via SFTP / SSH' below to browse this computer's folders over SSH/SFTP (Port 22), or tap 'Upload' to send files instantly via KDE Share."
             )
         )
+    }
+
+    private fun openJschSftpChannel(creds: SftpSessionCredentials): Pair<Session, ChannelSftp> {
+        val jsch = JSch()
+        val hostsToTry = listOfNotNull(creds.primaryHost, creds.fallbackHost).distinct()
+        var lastError: Throwable? = null
+
+        for (host in hostsToTry) {
+            try {
+                val session = jsch.getSession(creds.username, host, creds.port).apply {
+                    setPassword(creds.password)
+                    setConfig(
+                        Properties().apply {
+                            put("StrictHostKeyChecking", "no")
+                            put("PreferredAuthentications", "password,keyboard-interactive")
+                            // Enable ssh-rsa so KDE Connect Android's Apache MINA SSHD server negotiates cleanly
+                            val defaultHostKeys = JSch.getConfig("server_host_key") ?: ""
+                            if (!defaultHostKeys.contains("ssh-rsa")) {
+                                put("server_host_key", "$defaultHostKeys,ssh-rsa,rsa-sha2-256,rsa-sha2-512")
+                            }
+                            val defaultPubkey = JSch.getConfig("PubkeyAcceptedAlgorithms") ?: ""
+                            if (!defaultPubkey.contains("ssh-rsa")) {
+                                put("PubkeyAcceptedAlgorithms", "$defaultPubkey,ssh-rsa,rsa-sha2-256,rsa-sha2-512")
+                            }
+                        }
+                    )
+                    connect(8000)
+                }
+                val channel = (session.openChannel("sftp") as ChannelSftp).apply {
+                    connect(8000)
+                }
+                return session to channel
+            } catch (t: Throwable) {
+                lastError = t
+                logger.warn(LogCategory.FILES, "JSch SFTP connect failed to $host:${creds.port} — ${t.message}")
+            }
+        }
+        throw (lastError ?: IllegalStateException("Unable to establish SFTP session."))
     }
 
     private suspend fun browseViaRealSftp(
@@ -819,63 +1183,138 @@ class LanLinkEngine(
             var session: Session? = null
             var channel: ChannelSftp? = null
             try {
-                val jsch = JSch()
-                session = jsch.getSession(creds.username, creds.host, creds.port).apply {
-                    setPassword(creds.password)
-                    setConfig(Properties().apply { put("StrictHostKeyChecking", "no") })
-                    connect(8000)
-                }
-                channel = (session.openChannel("sftp") as ChannelSftp).apply {
-                    connect(8000)
+                val (s, ch) = openJschSftpChannel(creds)
+                session = s
+                channel = ch
+
+                val candidatePaths = buildList {
+                    if (relativePath == "/") {
+                        add(creds.rootPath)
+                        if (creds.rootPath != "/") add("/")
+                        creds.multiPaths.forEach { add(it) }
+                    } else {
+                        if (creds.rootPath == "/") {
+                            add(relativePath)
+                        } else {
+                            add(creds.rootPath.trimEnd('/') + relativePath)
+                            add(relativePath)
+                        }
+                    }
+                }.distinct()
+
+                var resolvedSftpDir: String? = null
+                var rawEntries: Vector<ChannelSftp.LsEntry>? = null
+                var lastLsErr: Throwable? = null
+
+                for (candidate in candidatePaths) {
+                    try {
+                        @Suppress("UNCHECKED_CAST")
+                        val ls = ch.ls(candidate) as Vector<ChannelSftp.LsEntry>
+                        resolvedSftpDir = candidate
+                        rawEntries = ls
+                        break
+                    } catch (e: Throwable) {
+                        lastLsErr = e
+                    }
                 }
 
-                val targetFull = if (relativePath == "/") {
-                    creds.rootPath
-                } else {
-                    creds.rootPath.trimEnd('/') + relativePath
-                }
+                val entriesVec = rawEntries ?: throw (lastLsErr ?: IllegalStateException("Unable to list $relativePath"))
+                val baseSftpDir = resolvedSftpDir ?: "/"
 
-                @Suppress("UNCHECKED_CAST")
-                val rawEntries = channel.ls(targetFull) as Vector<ChannelSftp.LsEntry>
-                val items = rawEntries
+                val items = entriesVec
                     .filter { it.filename != "." && it.filename != ".." }
                     .map { ls ->
-                        val isDir = ls.attrs.isDir
+                        val isDir = ls.attrs.isDir || ls.attrs.isLink
                         val childRel = if (relativePath == "/") "/${ls.filename}" else "$relativePath/${ls.filename}"
+                        val realChild = if (baseSftpDir == "/") "/${ls.filename}" else "${baseSftpDir.trimEnd('/')}/${ls.filename}"
                         RemoteFileEntry(
                             name = ls.filename,
                             relativePath = childRel,
                             isDirectory = isDir,
                             sizeBytes = if (isDir) 0L else ls.attrs.size,
                             lastModifiedEpochMs = ls.attrs.mTime.toLong() * 1000L,
-                            mimeType = if (isDir) "inode/directory" else guessMimeTypeByName(ls.filename)
+                            mimeType = if (isDir) "inode/directory" else guessMimeTypeByName(ls.filename),
+                            sftpRealPath = realChild
                         )
                     }
                     .sortedWith(compareByDescending<RemoteFileEntry> { it.isDirectory }.thenBy { it.name.lowercase() })
 
+                logger.info(
+                    LogCategory.FILES,
+                    "SFTP listed '$baseSftpDir' -> ${items.size} entries"
+                )
                 relativePath to items
             } finally {
                 runCatching { channel?.disconnect() }
                 runCatching { session?.disconnect() }
             }
+        }.onFailure { err ->
+            logger.error(LogCategory.FILES, "browseViaRealSftp failed for path '$relativePath'", err)
+        }
+    }
+
+    suspend fun uploadViaRealSftpIfConfigured(
+        deviceId: String,
+        targetRemoteDir: String,
+        safeFileName: String,
+        payloadBytes: ByteArray,
+        onProgress: suspend (transferred: Long, total: Long) -> Unit
+    ): Result<Boolean> = withContext(Dispatchers.IO) {
+        val creds = sftpCredentialsByDevice[deviceId] ?: return@withContext Result.success(false)
+        runCatching {
+            var session: Session? = null
+            var channel: ChannelSftp? = null
+            try {
+                val (s, ch) = openJschSftpChannel(creds)
+                session = s
+                channel = ch
+                val remoteDir = if (targetRemoteDir == "/") {
+                    creds.rootPath
+                } else if (creds.rootPath == "/") {
+                    targetRemoteDir
+                } else {
+                    creds.rootPath.trimEnd('/') + targetRemoteDir
+                }
+                val destPath = "${remoteDir.trimEnd('/')}/$safeFileName"
+                ch.put(destPath).use { out ->
+                    val chunk = 16 * 1024
+                    var offset = 0
+                    val total = payloadBytes.size.toLong()
+                    while (offset < payloadBytes.size) {
+                        val len = minOf(chunk, payloadBytes.size - offset)
+                        out.write(payloadBytes, offset, len)
+                        offset += len
+                        onProgress(offset.toLong(), total)
+                    }
+                    out.flush()
+                }
+                logger.info(LogCategory.FILES, "Uploaded '$safeFileName' via SFTP to '$destPath'")
+                true
+            } finally {
+                runCatching { channel?.disconnect() }
+                runCatching { session?.disconnect() }
+            }
+        }.onFailure { err ->
+            logger.warn(LogCategory.FILES, "Direct SFTP upload failed (${err.message}) — falling back to KDE SharePlugin")
         }
     }
 
     suspend fun downloadRemoteFile(
         deviceId: String,
-        remoteRelativePath: String,
+        entry: RemoteFileEntry,
         supportsApexVfs: Boolean,
         destinationOutput: OutputStream,
         onProgress: suspend (transferred: Long, total: Long) -> Unit
     ): Result<String> = withContext(Dispatchers.IO) {
-        val pathCheck = PathValidator.validateRemotePath(remoteRelativePath)
+        val pathCheck = PathValidator.validateRemotePath(entry.relativePath)
         if (pathCheck is PathValidator.ValidationResult.Denied) {
             return@withContext Result.failure(SecurityException(pathCheck.reason))
         }
         val cleanPath = (pathCheck as PathValidator.ValidationResult.Valid).normalizedRelativePath
 
-        if (supportsApexVfs) {
-            return@withContext downloadViaVfsTls(deviceId, cleanPath, destinationOutput, onProgress)
+        if (supportsApexVfs || !sftpCredentialsByDevice.containsKey(deviceId)) {
+            val vfsRes = downloadViaVfsTls(deviceId, cleanPath, destinationOutput, onProgress)
+            if (vfsRes.isSuccess || supportsApexVfs) return@withContext vfsRes
         }
 
         val creds = sftpCredentialsByDevice[deviceId]
@@ -885,19 +1324,19 @@ class LanLinkEngine(
             var session: Session? = null
             var channel: ChannelSftp? = null
             try {
-                val jsch = JSch()
-                session = jsch.getSession(creds.username, creds.host, creds.port).apply {
-                    setPassword(creds.password)
-                    setConfig(Properties().apply { put("StrictHostKeyChecking", "no") })
-                    connect(8000)
+                val (s, ch) = openJschSftpChannel(creds)
+                session = s
+                channel = ch
+
+                val fullRemotePath = entry.sftpRealPath ?: if (creds.rootPath == "/") {
+                    cleanPath
+                } else {
+                    creds.rootPath.trimEnd('/') + cleanPath
                 }
-                channel = (session.openChannel("sftp") as ChannelSftp).apply { connect(8000) }
+                val totalSize = runCatching { ch.lstat(fullRemotePath).size }.getOrDefault(entry.sizeBytes)
+                val digest = MessageDigest.getInstance("SHA-256")
 
-                val fullRemotePath = creds.rootPath.trimEnd('/') + cleanPath
-                val totalSize = runCatching { channel.lstat(fullRemotePath).size }.getOrDefault(0L)
-                val digest = java.security.MessageDigest.getInstance("SHA-256")
-
-                channel.get(fullRemotePath).use { input ->
+                ch.get(fullRemotePath).use { input ->
                     val buffer = ByteArray(16 * 1024)
                     var transferred = 0L
                     var read = input.read(buffer)
@@ -915,20 +1354,25 @@ class LanLinkEngine(
                     }
                     destinationOutput.flush()
                 }
-                CryptoIdentityManager.bytesToHex(digest.digest())
+                val shaHex = CryptoIdentityManager.bytesToHex(digest.digest())
+                logger.info(LogCategory.FILES, "Downloaded '$fullRemotePath' via SFTP (sha256=$shaHex)")
+                shaHex
             } finally {
                 runCatching { channel?.disconnect() }
                 runCatching { session?.disconnect() }
             }
+        }.onFailure { err ->
+            logger.error(LogCategory.FILES, "SFTP download failed for '${entry.relativePath}'", err)
         }
     }
 
     private suspend fun requestVfsDirectoryOverTls(
         deviceId: String,
-        cleanPath: String
+        cleanPath: String,
+        timeoutMs: Long = 8000L
     ): Result<Pair<String, List<RemoteFileEntry>>> = withContext(Dispatchers.IO) {
-        val reqId = java.util.UUID.randomUUID().toString()
-        val deferred = kotlinx.coroutines.CompletableDeferred<NetworkPacket>()
+        val reqId = UUID.randomUUID().toString()
+        val deferred = CompletableDeferred<NetworkPacket>()
         pendingVfsResponses[reqId] = deferred
 
         val pkt = NetworkPacket(
@@ -945,7 +1389,7 @@ class LanLinkEngine(
         }
 
         val resp = runCatching {
-            kotlinx.coroutines.withTimeout(8000) { deferred.await() }
+            withTimeout(timeoutMs) { deferred.await() }
         }.getOrElse {
             pendingVfsResponses.remove(reqId)
             return@withContext Result.failure(IllegalStateException("Timed out waiting for remote folder response."))
@@ -984,8 +1428,8 @@ class LanLinkEngine(
     ): Result<String> = withContext(Dispatchers.IO) {
         val session = activeSessions[deviceId]
             ?: return@withContext Result.failure(IllegalStateException("Peer disconnected."))
-        val reqId = java.util.UUID.randomUUID().toString()
-        val deferred = kotlinx.coroutines.CompletableDeferred<NetworkPacket>()
+        val reqId = UUID.randomUUID().toString()
+        val deferred = CompletableDeferred<NetworkPacket>()
         pendingVfsResponses[reqId] = deferred
 
         sendPacketToConnectedPeer(
@@ -999,7 +1443,7 @@ class LanLinkEngine(
             return@withContext Result.failure(it)
         }
 
-        val resp = runCatching { kotlinx.coroutines.withTimeout(8000) { deferred.await() } }.getOrElse {
+        val resp = runCatching { withTimeout(8000) { deferred.await() } }.getOrElse {
             pendingVfsResponses.remove(reqId)
             return@withContext Result.failure(it)
         }
@@ -1013,7 +1457,7 @@ class LanLinkEngine(
         if (port <= 0) return@withContext Result.failure(IllegalStateException("Missing payload port."))
 
         runCatching {
-            val digest = java.security.MessageDigest.getInstance("SHA-256")
+            val digest = MessageDigest.getInstance("SHA-256")
             val raw = Socket()
             raw.connect(InetSocketAddress(session.ipAddress, port), 8000)
             raw.soTimeout = 15_000
@@ -1042,16 +1486,72 @@ class LanLinkEngine(
             if (expectedSha.isNotBlank() && !expectedSha.equals(actualSha, ignoreCase = true)) {
                 throw SecurityException("SHA-256 verification failed.")
             }
+            logger.info(LogCategory.FILES, "Downloaded '$cleanPath' via TLS VFS (sha256=$actualSha)")
             actualSha
+        }.onFailure { err ->
+            logger.error(LogCategory.FILES, "TLS VFS download failed for '$cleanPath'", err)
         }
     }
 
+    /**
+     * Serves both:
+     * 1. Real user-shared phone folders granted via Android SAF (`safFoldersManager`)
+     * 2. Built-in `authorizedVaultRoot` (`Documents`, `Pictures`, `Downloads`)
+     */
     private fun serveLocalVfsRequest(packet: NetworkPacket, payload: ByteArray?): NetworkPacket? {
         val reqId = packet.getString("requestId")
         return when (packet.type) {
             NetworkPacket.TYPE_VFS_LIST_REQUEST -> {
                 val path = packet.getString("path", "/")
-                when (val res = PathValidator.resolveWithinRoot(authorizedVaultRoot, path)) {
+                val pathCheck = PathValidator.validateRemotePath(path)
+                if (pathCheck is PathValidator.ValidationResult.Denied) {
+                    return NetworkPacket(
+                        type = NetworkPacket.TYPE_VFS_LIST_RESPONSE,
+                        body = JSONObject().put("requestId", reqId).put("success", false).put("error", pathCheck.reason)
+                    )
+                }
+                val normPath = (pathCheck as PathValidator.ValidationResult.Valid).normalizedRelativePath
+
+                // Check if path targets a user-shared SAF phone folder!
+                val safMatch = safFoldersManager.findTreeForPath(normPath)
+                if (safMatch != null) {
+                    val (tree, subSegs) = safMatch
+                    return safFoldersManager.listSafDirectory(tree, subSegs, normPath).fold(
+                        onSuccess = { nodes ->
+                            val arr = JSONArray()
+                            nodes.forEach { n ->
+                                arr.put(
+                                    JSONObject().apply {
+                                        put("name", n.name)
+                                        put("path", n.relativePath)
+                                        put("isDirectory", n.isDirectory)
+                                        put("size", n.sizeBytes)
+                                        put("lastModified", n.lastModifiedEpochMs)
+                                        put("mimeType", n.mimeType)
+                                    }
+                                )
+                            }
+                            NetworkPacket(
+                                type = NetworkPacket.TYPE_VFS_LIST_RESPONSE,
+                                body = JSONObject().apply {
+                                    put("requestId", reqId)
+                                    put("success", true)
+                                    put("path", normPath)
+                                    put("entries", arr)
+                                }
+                            )
+                        },
+                        onFailure = { err ->
+                            NetworkPacket(
+                                type = NetworkPacket.TYPE_VFS_LIST_RESPONSE,
+                                body = JSONObject().put("requestId", reqId).put("success", false)
+                                    .put("error", err.message ?: "SAF folder unavailable")
+                            )
+                        }
+                    )
+                }
+
+                when (val res = PathValidator.resolveWithinRoot(authorizedVaultRoot, normPath)) {
                     is PathValidator.ValidationResult.Denied -> NetworkPacket(
                         type = NetworkPacket.TYPE_VFS_LIST_RESPONSE,
                         body = JSONObject().put("requestId", reqId).put("success", false).put("error", res.reason)
@@ -1059,6 +1559,23 @@ class LanLinkEngine(
                     is PathValidator.ValidationResult.Valid -> {
                         val dir = res.resolvedFile ?: authorizedVaultRoot
                         val arr = JSONArray()
+
+                        // At root `/`, also list every SAF phone folder shared by this user!
+                        if (res.normalizedRelativePath == "/") {
+                            safFoldersManager.sharedTrees.value.forEach { tree ->
+                                arr.put(
+                                    JSONObject().apply {
+                                        put("name", tree.alias)
+                                        put("path", "/${tree.alias}")
+                                        put("isDirectory", true)
+                                        put("size", 0L)
+                                        put("lastModified", System.currentTimeMillis())
+                                        put("mimeType", "inode/directory")
+                                    }
+                                )
+                            }
+                        }
+
                         dir.listFiles()
                             ?.sortedWith(compareByDescending<File> { it.isDirectory }.thenBy { it.name.lowercase() })
                             ?.forEach { f ->
@@ -1089,7 +1606,63 @@ class LanLinkEngine(
 
             NetworkPacket.TYPE_VFS_READ_REQUEST -> {
                 val path = packet.getString("path", "/")
-                when (val res = PathValidator.resolveWithinRoot(authorizedVaultRoot, path)) {
+                val pathCheck = PathValidator.validateRemotePath(path)
+                if (pathCheck is PathValidator.ValidationResult.Denied) {
+                    return NetworkPacket(
+                        type = NetworkPacket.TYPE_VFS_READ_RESPONSE,
+                        body = JSONObject().put("requestId", reqId).put("success", false).put("error", pathCheck.reason)
+                    )
+                }
+                val normPath = (pathCheck as PathValidator.ValidationResult.Valid).normalizedRelativePath
+
+                val safMatch = safFoldersManager.findTreeForPath(normPath)
+                if (safMatch != null) {
+                    val (tree, subSegs) = safMatch
+                    return safFoldersManager.openSafFileForRead(tree, subSegs).fold(
+                        onSuccess = { (name, size, shaAndOpener) ->
+                            val (sha, streamOpener) = shaAndOpener
+                            val payloadServer = openPayloadServerSocket()
+                            val port = payloadServer.localPort
+                            engineScope.launch {
+                                runCatching {
+                                    payloadServer.use { srv ->
+                                        srv.soTimeout = 15_000
+                                        val rawSock = srv.accept()
+                                        identityManager.convertToTlsSocket(
+                                            rawSocket = rawSock,
+                                            useClientMode = false,
+                                            requireClientCert = false
+                                        ).use { tls ->
+                                            streamOpener()?.buffered()?.use { it.copyTo(tls.outputStream) }
+                                            tls.outputStream.flush()
+                                        }
+                                    }
+                                }
+                            }
+                            NetworkPacket(
+                                type = NetworkPacket.TYPE_VFS_READ_RESPONSE,
+                                body = JSONObject().apply {
+                                    put("requestId", reqId)
+                                    put("success", true)
+                                    put("name", name)
+                                    put("size", size)
+                                    put("sha256", sha)
+                                },
+                                payloadSize = size,
+                                payloadTransferInfo = JSONObject().put("port", port)
+                            )
+                        },
+                        onFailure = { err ->
+                            NetworkPacket(
+                                type = NetworkPacket.TYPE_VFS_READ_RESPONSE,
+                                body = JSONObject().put("requestId", reqId).put("success", false)
+                                    .put("error", err.message ?: "Cannot read SAF file")
+                            )
+                        }
+                    )
+                }
+
+                when (val res = PathValidator.resolveWithinRoot(authorizedVaultRoot, normPath)) {
                     is PathValidator.ValidationResult.Denied -> NetworkPacket(
                         type = NetworkPacket.TYPE_VFS_READ_RESPONSE,
                         body = JSONObject().put("requestId", reqId).put("success", false).put("error", res.reason)
@@ -1103,12 +1676,12 @@ class LanLinkEngine(
                             )
                         } else {
                             val sha = CryptoIdentityManager.sha256File(file)
-                            val payloadServer = ServerSocket(0).apply { reuseAddress = true }
+                            val payloadServer = openPayloadServerSocket()
                             val port = payloadServer.localPort
                             engineScope.launch {
                                 runCatching {
                                     payloadServer.use { srv ->
-                                        srv.soTimeout = 12_000
+                                        srv.soTimeout = 15_000
                                         val rawSock = srv.accept()
                                         identityManager.convertToTlsSocket(
                                             rawSocket = rawSock,
@@ -1141,7 +1714,37 @@ class LanLinkEngine(
             NetworkPacket.TYPE_VFS_WRITE_REQUEST -> {
                 val dir = packet.getString("directory", "/")
                 val safeName = PathValidator.sanitizeFileName(packet.getString("filename", "upload.bin"))
-                val target = if (dir == "/") "/$safeName" else "$dir/$safeName"
+                if (payload == null) {
+                    return NetworkPacket(
+                        type = NetworkPacket.TYPE_VFS_WRITE_RESPONSE,
+                        body = JSONObject().put("requestId", reqId).put("success", false).put("error", "Empty payload.")
+                    )
+                }
+
+                val dirCheck = PathValidator.validateRemotePath(dir)
+                if (dirCheck is PathValidator.ValidationResult.Valid) {
+                    val safMatch = safFoldersManager.findTreeForPath(dirCheck.normalizedRelativePath)
+                    if (safMatch != null) {
+                        val (tree, subSegs) = safMatch
+                        return safFoldersManager.writeSafFile(tree, subSegs, safeName, payload).fold(
+                            onSuccess = { sha ->
+                                NetworkPacket(
+                                    type = NetworkPacket.TYPE_VFS_WRITE_RESPONSE,
+                                    body = JSONObject().put("requestId", reqId).put("success", true).put("sha256", sha)
+                                )
+                            },
+                            onFailure = { err ->
+                                NetworkPacket(
+                                    type = NetworkPacket.TYPE_VFS_WRITE_RESPONSE,
+                                    body = JSONObject().put("requestId", reqId).put("success", false)
+                                        .put("error", err.message ?: "SAF write failed")
+                                )
+                            }
+                        )
+                    }
+                }
+
+                val target = if (dir == "/") "/Downloads/$safeName" else "${dir.trimEnd('/')}/$safeName"
                 when (val res = PathValidator.resolveWithinRoot(authorizedVaultRoot, target)) {
                     is PathValidator.ValidationResult.Denied -> NetworkPacket(
                         type = NetworkPacket.TYPE_VFS_WRITE_RESPONSE,
@@ -1150,25 +1753,26 @@ class LanLinkEngine(
                     is PathValidator.ValidationResult.Valid -> {
                         val dest = res.resolvedFile!!
                         dest.parentFile?.mkdirs()
-                        if (payload != null) {
-                            dest.writeBytes(payload)
-                            NetworkPacket(
-                                type = NetworkPacket.TYPE_VFS_WRITE_RESPONSE,
-                                body = JSONObject().put("requestId", reqId).put("success", true)
-                                    .put("sha256", CryptoIdentityManager.sha256File(dest))
-                            )
-                        } else {
-                            NetworkPacket(
-                                type = NetworkPacket.TYPE_VFS_WRITE_RESPONSE,
-                                body = JSONObject().put("requestId", reqId).put("success", false).put("error", "Empty payload.")
-                            )
-                        }
+                        dest.writeBytes(payload)
+                        NetworkPacket(
+                            type = NetworkPacket.TYPE_VFS_WRITE_RESPONSE,
+                            body = JSONObject().put("requestId", reqId).put("success", true)
+                                .put("sha256", CryptoIdentityManager.sha256File(dest))
+                        )
                     }
                 }
             }
 
             else -> null
         }
+    }
+
+    private fun categorizePacket(type: String): LogCategory = when {
+        type == NetworkPacket.TYPE_IDENTITY -> LogCategory.DISCOVERY
+        type == NetworkPacket.TYPE_PAIR -> LogCategory.PAIRING
+        type.startsWith("kdeconnect.sftp") || type.startsWith("kdeconnect.vfs") || type == NetworkPacket.TYPE_SHARE_REQUEST -> LogCategory.FILES
+        type.startsWith("kdeconnect.space") -> LogCategory.SPACE
+        else -> LogCategory.PLUGINS
     }
 
     private fun extractCommonName(dn: String): String? {
@@ -1192,5 +1796,7 @@ class LanLinkEngine(
 
     companion object {
         const val DEFAULT_KDE_PORT = 1716
+        const val MIN_PAYLOAD_PORT = 1739
+        const val MAX_KDE_PORT = 1764
     }
 }

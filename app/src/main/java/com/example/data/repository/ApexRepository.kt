@@ -14,12 +14,15 @@ import android.os.Vibrator
 import android.os.VibratorManager
 import android.provider.OpenableColumns
 import android.util.Base64
+import com.example.core.diagnostics.DiagnosticLogger
+import com.example.core.diagnostics.LogCategory
 import com.example.core.network.LanLinkEngine
 import com.example.core.network.RemoteCommandItem
 import com.example.core.network.RemoteFileEntry
 import com.example.core.protocol.NetworkPacket
 import com.example.core.security.CryptoIdentityManager
 import com.example.core.security.PathValidator
+import com.example.core.security.SafSharedFoldersManager
 import com.example.data.local.ApexDatabase
 import com.example.data.local.AttachmentAvailability
 import com.example.data.local.DeviceMessageEntity
@@ -62,17 +65,14 @@ data class ActiveTransferProgress(
 }
 
 /**
- * Production Repository with ZERO pre-seeded fake/mock devices.
- *
- * Connects exclusively to real KDE Connect / ApexConnect devices discovered via UDP 1716, mDNS,
- * or direct IP connection, performs real X.509 certificate pinning & verification, exchanges
- * real Android hardware/OS telemetry (BatteryManager, ClipboardManager, Ringtone/Vibrator, SAF),
- * and synchronizes persistent Device Space items over mutual TLS.
+ * Production Repository with ZERO pre-seeded fake/mock devices and full DiagnosticLogger instrumentation.
  */
 class ApexRepository(
     private val context: Context,
     private val database: ApexDatabase,
-    val identityManager: CryptoIdentityManager
+    val identityManager: CryptoIdentityManager,
+    val diagnosticLogger: DiagnosticLogger = DiagnosticLogger.getInstance(context),
+    val safFoldersManager: SafSharedFoldersManager = SafSharedFoldersManager(context)
 ) {
     private val repoScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val deviceDao = database.deviceDao()
@@ -91,13 +91,15 @@ class ApexRepository(
     val lanEngine: LanLinkEngine = LanLinkEngine(
         context = context,
         identityManager = identityManager,
-        onPeerConnectedOrUpdated = { deviceId, deviceName, deviceType, ipAddress, tcpPort, certBytes, inCaps, outCaps ->
-            handleRealTlsPeerConnected(deviceId, deviceName, deviceType, ipAddress, tcpPort, certBytes, inCaps, outCaps)
+        safFoldersManager = safFoldersManager,
+        logger = diagnosticLogger,
+        onPeerConnectedOrUpdated = { deviceId, deviceName, deviceType, ipAddress, tcpPort, protoVer, certBytes, inCaps, outCaps ->
+            handleRealTlsPeerConnected(deviceId, deviceName, deviceType, ipAddress, tcpPort, protoVer, certBytes, inCaps, outCaps)
         },
         onPeerDisconnected = { deviceId ->
             runCatching {
                 deviceDao.updateReachability(deviceId, false)
-                logProtocolEvent("TLS link closed for peer $deviceId")
+                logProtocolEvent(LogCategory.TLS, "TLS link closed for peer $deviceId")
             }
         },
         onPacketReceived = { senderId, packet, payload ->
@@ -107,9 +109,9 @@ class ApexRepository(
 
     fun startEngine() {
         repoScope.launch {
-            // Reset reachability on cold boot so only genuinely connected LAN peers show Online
             deviceDao.markAllDisconnectedOnStartup()
             lanEngine.start()
+            lanEngine.awaitReady(1800L)
             broadcastDiscovery()
         }
     }
@@ -127,9 +129,6 @@ class ApexRepository(
 
     fun getLocalIpAddresses(): List<String> = lanEngine.getLocalLanIpAddresses()
 
-    /**
-     * Parses real remote commands advertised by the connected KDE Connect desktop (`kdeconnect.runcommand`).
-     */
     fun getRemoteCommandsForDevice(device: PairedDeviceEntity): List<RemoteCommandItem> {
         return runCatching {
             val arr = JSONArray(device.remoteCommandsJson)
@@ -148,17 +147,18 @@ class ApexRepository(
         }.getOrDefault(emptyList())
     }
 
-    private fun logProtocolEvent(summary: String) {
+    private fun logProtocolEvent(category: LogCategory, summary: String) {
         val stamp = SimpleDateFormat("HH:mm:ss", Locale.US).format(Date())
-        _protocolEvents.value = (listOf("[$stamp] $summary") + _protocolEvents.value).take(40)
+        _protocolEvents.value = (listOf("[$stamp] $summary") + _protocolEvents.value).take(50)
+        diagnosticLogger.info(category, summary)
     }
 
     suspend fun broadcastDiscovery(customIp: String? = null): Boolean = withContext(Dispatchers.IO) {
         val ok = lanEngine.broadcastUdpIdentity(customIp)
         if (!customIp.isNullOrBlank()) {
-            logProtocolEvent("Probing KDE Connect node at ${customIp.trim()}:1716 (UDP + TCP/TLS)")
+            logProtocolEvent(LogCategory.DISCOVERY, "Probing node at ${customIp.trim()} (UDP + TCP/TLS)")
         } else {
-            logProtocolEvent("Broadcasted KDE Connect v8 identity on UDP 1716")
+            logProtocolEvent(LogCategory.DISCOVERY, "Broadcasted KDE Connect identity burst on UDP 1716")
         }
         ok
     }
@@ -173,6 +173,7 @@ class ApexRepository(
         deviceType: String,
         ipAddress: String,
         tcpPort: Int,
+        protocolVersion: Int,
         certBytes: ByteArray?,
         inCaps: List<String>,
         outCaps: List<String>
@@ -180,14 +181,16 @@ class ApexRepository(
         val existing = deviceDao.getDeviceById(deviceId)
         val certBase64 = certBytes?.let { Base64.encodeToString(it, Base64.NO_WRAP) }
 
-        // Enforce certificate pinning if this device was already paired!
         if (existing != null &&
             existing.pairState == PairState.PAIRED &&
             !existing.pinnedCertificateBase64.isNullOrBlank() &&
             certBase64 != null &&
             existing.pinnedCertificateBase64 != certBase64
         ) {
-            logProtocolEvent("SECURITY ALERT: Certificate mismatch for paired peer $deviceName — rejecting trust!")
+            diagnosticLogger.error(
+                LogCategory.PAIRING,
+                "Certificate mismatch for paired peer '$deviceName' ($deviceId) — resetting trust to UNPAIRED!"
+            )
             deviceDao.updatePairState(deviceId, PairState.UNPAIRED)
             return
         }
@@ -204,19 +207,30 @@ class ApexRepository(
             existing?.verificationCode ?: ""
         }
 
-        val supportsKdeSftp = outCaps.contains(NetworkPacket.TYPE_SFTP) || inCaps.contains(NetworkPacket.TYPE_SFTP_REQUEST)
-        val supportsApexVfs = inCaps.contains(NetworkPacket.TYPE_VFS_LIST_REQUEST)
+        // In KDE Connect:
+        // - Peer can serve SFTP to us ONLY if peer's outgoingCapabilities has `kdeconnect.sftp`
+        //   AND peer's incomingCapabilities has `kdeconnect.sftp.request`
+        val supportsKdeSftp = outCaps.contains(NetworkPacket.TYPE_SFTP) &&
+            inCaps.contains(NetworkPacket.TYPE_SFTP_REQUEST)
+        val supportsApexVfs = inCaps.contains(NetworkPacket.TYPE_VFS_LIST_REQUEST) ||
+            outCaps.contains(NetworkPacket.TYPE_VFS_LIST_RESPONSE)
         val supportsSpace = inCaps.contains(NetworkPacket.TYPE_SPACE_MESSAGE)
         val supportsMousepad = inCaps.contains(NetworkPacket.TYPE_MOUSEPAD_REQUEST)
-        val supportsMpris = outCaps.contains(NetworkPacket.TYPE_MPRIS) || inCaps.contains(NetworkPacket.TYPE_MPRIS_REQUEST)
+        val supportsMpris = outCaps.contains(NetworkPacket.TYPE_MPRIS) ||
+            inCaps.contains(NetworkPacket.TYPE_MPRIS_REQUEST)
 
         val peerEntity = PairedDeviceEntity(
             deviceId = deviceId,
-            deviceName = deviceName,
+            deviceName = if (deviceName.startsWith("Device (") && existing != null && !existing.deviceName.startsWith("Device (")) {
+                existing.deviceName
+            } else {
+                deviceName
+            },
             deviceType = deviceType,
             platformOs = inferPeerLabel(deviceType, supportsKdeSftp, supportsApexVfs),
             ipAddress = ipAddress,
             tcpPort = tcpPort,
+            protocolVersion = protocolVersion,
             pairState = existing?.pairState ?: PairState.UNPAIRED,
             isReachable = true,
             certificateFingerprint = fingerprint,
@@ -224,7 +238,7 @@ class ApexRepository(
             pinnedCertificateBase64 = existing?.pinnedCertificateBase64 ?: certBase64,
             batteryLevel = existing?.batteryLevel ?: -1,
             isCharging = existing?.isCharging ?: false,
-            supportsRemoteFs = supportsKdeSftp || supportsApexVfs,
+            supportsRemoteFs = supportsKdeSftp || supportsApexVfs || lanEngine.hasSftpCredentials(deviceId),
             supportsKdeSftp = supportsKdeSftp,
             supportsApexVfs = supportsApexVfs,
             supportsUploadFs = true,
@@ -241,7 +255,7 @@ class ApexRepository(
             lastSeenEpochMs = System.currentTimeMillis()
         )
         deviceDao.upsertDevice(peerEntity)
-        logProtocolEvent("TLS 1.3 link established with '$deviceName' ($ipAddress)")
+        logProtocolEvent(LogCategory.TLS, "TLS link active with '${peerEntity.deviceName}' ($ipAddress)")
 
         if (peerEntity.pairState == PairState.PAIRED) {
             onTrustedPeerSessionReady(deviceId)
@@ -250,7 +264,7 @@ class ApexRepository(
 
     private fun inferPeerLabel(deviceType: String, kdeSftp: Boolean, apexVfs: Boolean): String {
         val base = when (deviceType.lowercase()) {
-            "desktop" -> "Desktop Workstation"
+            "desktop" -> "Desktop"
             "laptop" -> "Laptop"
             "phone", "smartphone" -> "Phone"
             "tablet" -> "Tablet"
@@ -259,15 +273,15 @@ class ApexRepository(
         }
         return when {
             apexVfs -> "$base • ApexConnect VFS"
-            kdeSftp -> "$base • KDE Connect SFTP"
-            else -> "$base • KDE Connect v8"
+            kdeSftp -> "$base • KDE SFTP"
+            else -> "$base • KDE Connect"
         }
     }
 
-    /**
-     * Immediately exchanges real Android battery state, requests remote battery, MPRIS player list,
-     * and remote RunCommands, and flushes any offline-queued Device Space messages/notes.
-     */
+    suspend fun refreshRemoteTelemetry(deviceId: String) {
+        onTrustedPeerSessionReady(deviceId)
+    }
+
     private suspend fun onTrustedPeerSessionReady(deviceId: String) {
         sendLocalAndroidBatteryToPeer(deviceId)
         lanEngine.sendPacketToConnectedPeer(
@@ -309,23 +323,33 @@ class ApexRepository(
     }
 
     // =========================================================================
-    // PAIRING LIFECYCLE (`kdeconnect.pair`)
+    // PAIRING LIFECYCLE (`kdeconnect.pair` — Protocol v7 Compatible)
     // =========================================================================
 
     suspend fun requestPairing(deviceId: String) = withContext(Dispatchers.IO) {
         val device = deviceDao.getDeviceById(deviceId) ?: return@withContext
+        if (!lanEngine.isSessionActive(deviceId)) {
+            diagnosticLogger.warn(
+                LogCategory.PAIRING,
+                "Active TLS session missing for '${device.deviceName}' before pairing — reconnecting to ${device.ipAddress}:${device.tcpPort}"
+            )
+            lanEngine.initiateOutgoingConnectionToPeer(device.ipAddress, device.tcpPort, null)
+        }
+
+        // Standard KDE Connect v7 pair request (`{"pair": true}`) — zero clock-skew rejection!
         val packet = NetworkPacket(
             type = NetworkPacket.TYPE_PAIR,
-            body = JSONObject().apply {
-                put("pair", true)
-                put("timestamp", System.currentTimeMillis() / 1000L)
-            }
+            body = JSONObject().put("pair", true)
         )
         val res = lanEngine.sendPacketToConnectedPeer(deviceId, packet)
         if (res.isSuccess) {
             deviceDao.updatePairState(deviceId, PairState.PAIR_REQUESTED_BY_US)
-            logProtocolEvent("Sent kdeconnect.pair request to ${device.deviceName} — accept on remote device")
+            logProtocolEvent(
+                LogCategory.PAIRING,
+                "Sent kdeconnect.pair request to ${device.deviceName} (verifyKey=${device.verificationCode})"
+            )
         } else {
+            diagnosticLogger.error(LogCategory.PAIRING, "Failed sending pair request to ${device.deviceName}", res.exceptionOrNull())
             _incomingAlerts.tryEmit("Cannot reach ${device.deviceName}. Tap Scan to reconnect.")
         }
     }
@@ -339,10 +363,11 @@ class ApexRepository(
         val res = lanEngine.sendPacketToConnectedPeer(deviceId, packet)
         if (res.isSuccess) {
             deviceDao.updatePairState(deviceId, PairState.PAIRED)
-            logProtocolEvent("Paired & pinned X.509 certificate for ${device.deviceName}")
+            logProtocolEvent(LogCategory.PAIRING, "Accepted pairing & pinned X.509 certificate for ${device.deviceName}")
             onTrustedPeerSessionReady(deviceId)
         } else {
-            _incomingAlerts.tryEmit("Pairing failed: peer socket closed.")
+            diagnosticLogger.error(LogCategory.PAIRING, "Failed accepting pairing for ${device.deviceName}", res.exceptionOrNull())
+            _incomingAlerts.tryEmit("Pairing failed: peer socket closed. Tap Scan to retry.")
         }
     }
 
@@ -355,7 +380,7 @@ class ApexRepository(
             )
         }
         deviceDao.updatePairState(deviceId, PairState.UNPAIRED)
-        logProtocolEvent("Unpaired ${device.deviceName}")
+        logProtocolEvent(LogCategory.PAIRING, "Unpaired ${device.deviceName}")
     }
 
     suspend fun reconnectDevice(deviceId: String) = withContext(Dispatchers.IO) {
@@ -366,6 +391,29 @@ class ApexRepository(
     // =========================================================================
     // FEATURE 1: REAL REMOTE FILE BROWSING & SHARE/UPLOAD
     // =========================================================================
+
+    suspend fun configureCustomSftpForPeer(
+        deviceId: String,
+        host: String,
+        port: Int,
+        username: String,
+        password: String,
+        rootPath: String
+    ): Result<Pair<String, List<RemoteFileEntry>>> = withContext(Dispatchers.IO) {
+        val device = deviceDao.getDeviceById(deviceId)
+            ?: return@withContext Result.failure(IllegalArgumentException("Device not found."))
+        val effectiveHost = host.trim().ifBlank { device.ipAddress }
+        lanEngine.configureManualSftpCredentials(
+            deviceId = deviceId,
+            host = effectiveHost,
+            port = port,
+            username = username,
+            password = password,
+            rootPath = rootPath
+        )
+        deviceDao.upsertDevice(device.copy(supportsRemoteFs = true))
+        listRemoteDirectory(deviceId, "/")
+    }
 
     suspend fun listRemoteDirectory(
         deviceId: String,
@@ -379,18 +427,23 @@ class ApexRepository(
                 SecurityException("Pair with ${device.deviceName} first before browsing remote files.")
             )
         }
-        if (!device.isReachable) {
+        if (!device.isReachable && !lanEngine.hasSftpCredentials(deviceId)) {
             return@withContext Result.failure(
                 IllegalStateException("${device.deviceName} is currently offline on Wi-Fi/LAN.")
             )
         }
 
-        lanEngine.requestSftpAndBrowseDirectory(
+        val res = lanEngine.requestSftpAndBrowseDirectory(
             deviceId = deviceId,
             requestedPath = requestedPath,
             supportsKdeSftp = device.supportsKdeSftp,
             supportsApexVfs = device.supportsApexVfs
         )
+        // If quick VFS probe succeeded for a direct-IP peer, persist supportsApexVfs = true!
+        if (res.isSuccess && !device.supportsRemoteFs) {
+            deviceDao.upsertDevice(device.copy(supportsRemoteFs = true, supportsApexVfs = !lanEngine.hasSftpCredentials(deviceId)))
+        }
+        res
     }
 
     suspend fun downloadRemoteFile(
@@ -401,8 +454,8 @@ class ApexRepository(
         val device = deviceDao.getDeviceById(deviceId)
             ?: return@withContext Result.failure(IllegalArgumentException("Device not found."))
 
-        if (device.pairState != PairState.PAIRED || !device.isReachable) {
-            return@withContext Result.failure(IllegalStateException("Device must be paired and online."))
+        if (device.pairState != PairState.PAIRED) {
+            return@withContext Result.failure(IllegalStateException("Device must be paired first."))
         }
 
         val transferId = UUID.randomUUID().toString()
@@ -442,7 +495,7 @@ class ApexRepository(
             outStream.use { output ->
                 lanEngine.downloadRemoteFile(
                     deviceId = deviceId,
-                    remoteRelativePath = entry.relativePath,
+                    entry = entry,
                     supportsApexVfs = device.supportsApexVfs,
                     destinationOutput = output,
                     onProgress = { transferred, total ->
@@ -480,7 +533,7 @@ class ApexRepository(
                         sha256Checksum = sha256
                     )
                 )
-                logProtocolEvent("Downloaded '$safeName' (SHA-256 verified)")
+                logProtocolEvent(LogCategory.FILES, "Downloaded '$safeName' (SHA-256 verified)")
                 Result.success(if (safDestinationUri == null) localCacheTarget else null)
             },
             onFailure = { err ->
@@ -490,12 +543,6 @@ class ApexRepository(
         )
     }
 
-    /**
-     * Sends a real file to the paired peer:
-     * - Uses `kdeconnect.vfs.write.request` if the peer is another ApexConnect device browsing a specific folder.
-     * - Otherwise sends standard KDE Connect `kdeconnect.share.request` with TLS payload streaming so
-     *   desktop Linux/Windows/macOS KDE Connect saves the file directly into its Downloads folder!
-     */
     suspend fun uploadFileToRemoteDirectory(
         deviceId: String,
         targetRemoteDir: String,
@@ -507,7 +554,7 @@ class ApexRepository(
         if (device.pairState != PairState.PAIRED) {
             return@withContext Result.failure(SecurityException("Pair with ${device.deviceName} first."))
         }
-        if (!device.isReachable) {
+        if (!device.isReachable && !lanEngine.hasSftpCredentials(deviceId)) {
             return@withContext Result.failure(IllegalStateException("${device.deviceName} is offline."))
         }
 
@@ -527,42 +574,32 @@ class ApexRepository(
             totalBytes = total.coerceAtLeast(1L)
         )
 
-        val packet = if (device.supportsApexVfs) {
-            NetworkPacket(
-                type = NetworkPacket.TYPE_VFS_WRITE_REQUEST,
-                body = JSONObject().apply {
-                    put("requestId", transferId)
-                    put("directory", targetRemoteDir)
-                    put("filename", safeName)
-                }
-            )
-        } else {
-            // Standard KDE Connect SharePlugin file transfer — works out of the box with PC/Mac/Phone KDE Connect!
-            NetworkPacket(
-                type = NetworkPacket.TYPE_SHARE_REQUEST,
-                body = JSONObject().apply {
-                    put("filename", safeName)
-                    put("creationTime", System.currentTimeMillis())
-                    put("lastModified", System.currentTimeMillis())
-                }
-            )
-        }
-
         val res = try {
-            lanEngine.sendPacketToConnectedPeer(
-                deviceId = deviceId,
-                packet = packet,
-                payloadBytes = payloadBytes,
-                onProgress = { sent, max ->
-                    _activeTransfer.value = ActiveTransferProgress(
-                        transferId = transferId,
-                        fileName = safeName,
-                        direction = "UPLOAD",
-                        transferredBytes = sent,
-                        totalBytes = max.coerceAtLeast(1L)
-                    )
+            // 1. If SFTP session is active for a non-VFS peer, upload directly into targetRemoteDir over SFTP!
+            if (!device.supportsApexVfs && lanEngine.hasSftpCredentials(deviceId)) {
+                val sftpUploaded = lanEngine.uploadViaRealSftpIfConfigured(
+                    deviceId = deviceId,
+                    targetRemoteDir = targetRemoteDir,
+                    safeFileName = safeName,
+                    payloadBytes = payloadBytes,
+                    onProgress = { sent, max ->
+                        _activeTransfer.value = ActiveTransferProgress(
+                            transferId = transferId,
+                            fileName = safeName,
+                            direction = "UPLOAD",
+                            transferredBytes = sent,
+                            totalBytes = max.coerceAtLeast(1L)
+                        )
+                    }
+                )
+                if (sftpUploaded.getOrDefault(false)) {
+                    Result.success(Unit)
+                } else {
+                    sendShareOrVfsUpload(device, transferId, targetRemoteDir, safeName, payloadBytes)
                 }
-            )
+            } else {
+                sendShareOrVfsUpload(device, transferId, targetRemoteDir, safeName, payloadBytes)
+            }
         } finally {
             _activeTransfer.value = null
         }
@@ -583,7 +620,7 @@ class ApexRepository(
                         sha256Checksum = CryptoIdentityManager.bytesToHex(CryptoIdentityManager.sha256(payloadBytes))
                     )
                 )
-                logProtocolEvent("Sent file '$safeName' ($total bytes) -> ${device.deviceName}")
+                logProtocolEvent(LogCategory.FILES, "Sent file '$safeName' ($total bytes) -> ${device.deviceName}")
                 Result.success(Unit)
             },
             onFailure = { err ->
@@ -602,6 +639,50 @@ class ApexRepository(
                     )
                 )
                 Result.failure(err)
+            }
+        )
+    }
+
+    private suspend fun sendShareOrVfsUpload(
+        device: PairedDeviceEntity,
+        transferId: String,
+        targetRemoteDir: String,
+        safeName: String,
+        payloadBytes: ByteArray
+    ): Result<Unit> {
+        val packet = if (device.supportsApexVfs) {
+            NetworkPacket(
+                type = NetworkPacket.TYPE_VFS_WRITE_REQUEST,
+                body = JSONObject().apply {
+                    put("requestId", transferId)
+                    put("directory", targetRemoteDir)
+                    put("filename", safeName)
+                }
+            )
+        } else {
+            NetworkPacket(
+                type = NetworkPacket.TYPE_SHARE_REQUEST,
+                body = JSONObject().apply {
+                    put("filename", safeName)
+                    put("creationTime", System.currentTimeMillis())
+                    put("lastModified", System.currentTimeMillis())
+                    put("numberOfFiles", 1)
+                    put("totalPayloadSize", payloadBytes.size.toLong())
+                }
+            )
+        }
+        return lanEngine.sendPacketToConnectedPeer(
+            deviceId = device.deviceId,
+            packet = packet,
+            payloadBytes = payloadBytes,
+            onProgress = { sent, max ->
+                _activeTransfer.value = ActiveTransferProgress(
+                    transferId = transferId,
+                    fileName = safeName,
+                    direction = "UPLOAD",
+                    transferredBytes = sent,
+                    totalBytes = max.coerceAtLeast(1L)
+                )
             }
         )
     }
@@ -700,12 +781,15 @@ class ApexRepository(
         message: DeviceMessageEntity
     ) {
         if (!device.supportsSpaceSync) {
-            // Interoperate natively with standard desktop/mobile KDE Connect using `kdeconnect.share.request` / `kdeconnect.ping`!
             val bytes = message.attachmentLocalPath?.let { File(it).takeIf(File::exists)?.readBytes() }
             val fallbackPacket = if (message.contentType == MessageContentType.IMAGE && bytes != null) {
                 NetworkPacket(
                     type = NetworkPacket.TYPE_SHARE_REQUEST,
-                    body = JSONObject().put("filename", message.attachmentFileName ?: "image.jpg")
+                    body = JSONObject().apply {
+                        put("filename", message.attachmentFileName ?: "image.jpg")
+                        put("numberOfFiles", 1)
+                        put("totalPayloadSize", bytes.size.toLong())
+                    }
                 )
             } else {
                 NetworkPacket(
@@ -716,7 +800,7 @@ class ApexRepository(
             val res = lanEngine.sendPacketToConnectedPeer(device.deviceId, fallbackPacket, bytes)
             if (res.isSuccess) {
                 spaceDao.updateMessageStatus(message.messageUuid, SyncStatus.DELIVERED)
-                logProtocolEvent("Delivered message to KDE Connect SharePlugin on ${device.deviceName}")
+                logProtocolEvent(LogCategory.SPACE, "Delivered Space item via SharePlugin to ${device.deviceName}")
             } else {
                 spaceDao.updateMessageStatus(message.messageUuid, SyncStatus.FAILED, res.exceptionOrNull()?.message)
             }
@@ -824,7 +908,6 @@ class ApexRepository(
 
     private suspend fun dispatchNoteOverProtocol(device: PairedDeviceEntity, note: DeviceNoteEntity) {
         if (!device.supportsSpaceSync) {
-            // Also share non-deleted note text to standard KDE Connect desktop SharePlugin!
             if (!note.isDeletedTombstone) {
                 val sharePkt = NetworkPacket(
                     type = NetworkPacket.TYPE_SHARE_REQUEST,
@@ -898,24 +981,33 @@ class ApexRepository(
             val wantsPair = packet.getBoolean("pair", false)
             if (wantsPair) {
                 if (device.pairState == PairState.PAIR_REQUESTED_BY_US) {
-                    // Mutual pair accepted by remote KDE Connect device!
                     deviceDao.updatePairState(senderDeviceId, PairState.PAIRED)
-                    logProtocolEvent("Pairing accepted by ${device.deviceName}!")
+                    logProtocolEvent(LogCategory.PAIRING, "Pairing accepted by ${device.deviceName}!")
                     _incomingAlerts.tryEmit("Paired with ${device.deviceName}")
                     onTrustedPeerSessionReady(senderDeviceId)
                 } else {
                     deviceDao.updatePairState(senderDeviceId, PairState.PAIR_REQUESTED_BY_PEER)
-                    _incomingAlerts.tryEmit("Pairing request from ${device.deviceName} (${device.verificationCode})")
+                    logProtocolEvent(
+                        LogCategory.PAIRING,
+                        "Incoming kdeconnect.pair request from ${device.deviceName} (verifyKey=${device.verificationCode})"
+                    )
+                    _incomingAlerts.tryEmit("Pair request from ${device.deviceName} (${device.verificationCode})")
                 }
             } else {
                 deviceDao.updatePairState(senderDeviceId, PairState.UNPAIRED)
+                logProtocolEvent(LogCategory.PAIRING, "${device.deviceName} sent unpair (pair=false)")
                 _incomingAlerts.tryEmit("${device.deviceName} unpaired")
             }
             return@withContext
         }
 
-        // Reject non-pairing packets from untrusted peers
-        if (device.pairState != PairState.PAIRED) return@withContext
+        if (device.pairState != PairState.PAIRED) {
+            diagnosticLogger.warn(
+                LogCategory.PLUGINS,
+                "Ignored ${packet.type} from unpaired peer '${device.deviceName}'"
+            )
+            return@withContext
+        }
 
         when (packet.type) {
             NetworkPacket.TYPE_BATTERY -> {
@@ -940,7 +1032,7 @@ class ApexRepository(
                             cm?.setPrimaryClip(ClipData.newPlainText("KDE Connect", clip))
                         }
                     }
-                    logProtocolEvent("Received clipboard from ${device.deviceName}")
+                    logProtocolEvent(LogCategory.PLUGINS, "Received clipboard from ${device.deviceName}")
                 }
             }
 
@@ -948,7 +1040,6 @@ class ApexRepository(
                 val msg = packet.getString("message", "Ping!")
                 vibrateAndPlayNotificationSound()
                 _incomingAlerts.tryEmit("Ping from ${device.deviceName}: $msg")
-                // Also record incoming ping with custom message in Device Space so user doesn't miss it
                 if (packet.body.has("message") && msg.isNotBlank()) {
                     val now = System.currentTimeMillis()
                     spaceDao.insertMessageIgnoreDuplicate(
@@ -974,8 +1065,10 @@ class ApexRepository(
 
             NetworkPacket.TYPE_MPRIS -> {
                 val players = packet.getStringList("playerList")
-                if (players.isNotEmpty() && device.mediaPlayerName.isBlank()) {
-                    val chosen = players.first()
+                if (packet.body.has("playerList")) {
+                    val chosen = players.firstOrNull { it == device.mediaPlayerName }
+                        ?: players.firstOrNull()
+                        ?: ""
                     deviceDao.updateMediaState(
                         senderDeviceId,
                         chosen,
@@ -984,17 +1077,18 @@ class ApexRepository(
                         device.mediaTitle,
                         device.mediaArtist
                     )
-                    // Subscribe to metadata updates from this player
-                    lanEngine.sendPacketToConnectedPeer(
-                        senderDeviceId,
-                        NetworkPacket(
-                            type = NetworkPacket.TYPE_MPRIS_REQUEST,
-                            body = JSONObject()
-                                .put("player", chosen)
-                                .put("requestNowPlaying", true)
-                                .put("requestVolume", true)
+                    if (chosen.isNotBlank()) {
+                        lanEngine.sendPacketToConnectedPeer(
+                            senderDeviceId,
+                            NetworkPacket(
+                                type = NetworkPacket.TYPE_MPRIS_REQUEST,
+                                body = JSONObject()
+                                    .put("player", chosen)
+                                    .put("requestNowPlaying", true)
+                                    .put("requestVolume", true)
+                            )
                         )
-                    )
+                    }
                 } else {
                     val player = packet.getString("player", device.mediaPlayerName)
                     val title = packet.getString("title", packet.getString("nowPlaying", device.mediaTitle))
@@ -1025,7 +1119,6 @@ class ApexRepository(
                 }
             }
 
-            // Incoming standard KDE Connect SharePlugin (text, URL, or binary file/image from PC/Mac!)
             NetworkPacket.TYPE_SHARE_REQUEST -> {
                 val now = System.currentTimeMillis()
                 val uuid = "share_${packet.id}_${UUID.randomUUID().toString().take(6)}"
@@ -1035,6 +1128,21 @@ class ApexRepository(
                     val downloadsDir = File(lanEngine.authorizedVaultRoot, "Downloads").apply { mkdirs() }
                     val savedFile = File(downloadsDir, safeName)
                     savedFile.writeBytes(payloadBytes)
+
+                    transferDao.upsertTransfer(
+                        TransferRecordEntity(
+                            transferId = uuid,
+                            deviceId = senderDeviceId,
+                            fileName = safeName,
+                            remotePath = "/Downloads/$safeName",
+                            localPathOrUri = savedFile.absolutePath,
+                            direction = "DOWNLOAD",
+                            totalBytes = payloadBytes.size.toLong(),
+                            transferredBytes = payloadBytes.size.toLong(),
+                            status = "COMPLETED",
+                            sha256Checksum = CryptoIdentityManager.sha256File(savedFile)
+                        )
+                    )
 
                     val isImg = safeName.endsWith(".png", true) ||
                         safeName.endsWith(".jpg", true) ||
@@ -1095,7 +1203,7 @@ class ApexRepository(
                                 updatedAtEpochMs = now
                             )
                         )
-                        _incomingAlerts.tryEmit("New shared message from ${device.deviceName}")
+                        _incomingAlerts.tryEmit("New shared text from ${device.deviceName}")
                     }
                 }
             }
@@ -1231,7 +1339,7 @@ class ApexRepository(
                 type = NetworkPacket.TYPE_CLIPBOARD,
                 body = JSONObject().put("content", clipboardText)
             ),
-            eventLog = "Synced clipboard"
+            eventLog = "Synced clipboard (${clipboardText.length} chars)"
         )
         if (res.isSuccess) {
             deviceDao.updateClipboard(deviceId, clipboardText)
@@ -1239,34 +1347,59 @@ class ApexRepository(
         res
     }
 
+    /**
+     * Supports 60fps cursor deltas (`dx`, `dy`), two-finger scroll (`scroll = true`),
+     * mouse clicks, printable text (`key`), and KDE Connect special keys (`specialKey`:
+     * 1 = Backspace, 2 = Tab, 12 = Enter, 14 = Escape).
+     */
     suspend fun sendMousepadInput(
         deviceId: String,
         dx: Float = 0f,
         dy: Float = 0f,
+        isScroll: Boolean = false,
         singleClick: Boolean = false,
         rightClick: Boolean = false,
-        keyText: String? = null
-    ): Result<Unit> {
+        keyText: String? = null,
+        specialKey: Int? = null
+    ): Result<Unit> = withContext(Dispatchers.IO) {
         val body = JSONObject().apply {
             if (dx != 0f || dy != 0f) {
                 put("dx", dx.toDouble())
                 put("dy", dy.toDouble())
+                if (isScroll) put("scroll", true)
             }
             if (singleClick) put("singleclick", true)
             if (rightClick) put("rightclick", true)
             if (!keyText.isNullOrEmpty()) put("key", keyText)
+            if (specialKey != null) put("specialKey", specialKey)
         }
-        return sendTrustedPluginPacket(
-            deviceId = deviceId,
-            packet = NetworkPacket(type = NetworkPacket.TYPE_MOUSEPAD_REQUEST, body = body),
-            eventLog = null
-        )
+        val pkt = NetworkPacket(type = NetworkPacket.TYPE_MOUSEPAD_REQUEST, body = body)
+
+        // Fast path for cursor drag deltas: skip SQLite round-trip per frame!
+        if ((dx != 0f || dy != 0f) && !singleClick && !rightClick && keyText == null && specialKey == null) {
+            return@withContext if (lanEngine.sendFastPacketIfConnected(deviceId, pkt)) {
+                Result.success(Unit)
+            } else {
+                Result.failure(IllegalStateException("Peer not connected"))
+            }
+        }
+        sendTrustedPluginPacket(deviceId = deviceId, packet = pkt, eventLog = null)
     }
 
     suspend fun sendMprisAction(deviceId: String, action: String, newVolume: Int? = null): Result<Unit> =
         withContext(Dispatchers.IO) {
             val device = deviceDao.getDeviceById(deviceId)
                 ?: return@withContext Result.failure(IllegalArgumentException("Select a paired device first."))
+            if (device.mediaPlayerName.isBlank()) {
+                // Ask peer for active MPRIS player list first so subsequent commands target the right player
+                lanEngine.sendPacketToConnectedPeer(
+                    deviceId,
+                    NetworkPacket(
+                        type = NetworkPacket.TYPE_MPRIS_REQUEST,
+                        body = JSONObject().put("requestPlayerList", true)
+                    )
+                )
+            }
             val body = JSONObject().apply {
                 if (device.mediaPlayerName.isNotBlank()) {
                     put("player", device.mediaPlayerName)
@@ -1309,7 +1442,7 @@ class ApexRepository(
         }
         val res = lanEngine.sendPacketToConnectedPeer(deviceId, packet)
         if (res.isSuccess && eventLog != null) {
-            logProtocolEvent("$eventLog -> ${device.deviceName}")
+            logProtocolEvent(LogCategory.PLUGINS, "$eventLog -> ${device.deviceName}")
         }
         res
     }
@@ -1324,10 +1457,10 @@ class ApexRepository(
 
     private fun vibrateAndPlayRingtoneAlert() {
         runCatching {
-            val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
-                ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+            val uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_ALARM)
+                ?: RingtoneManager.getDefaultUri(RingtoneManager.TYPE_RINGTONE)
             RingtoneManager.getRingtone(context, uri)?.play()
-            vibratePattern(500L)
+            vibratePattern(650L)
         }
     }
 

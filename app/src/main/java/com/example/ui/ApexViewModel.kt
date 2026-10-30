@@ -15,10 +15,14 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import com.example.core.diagnostics.DiagnosticLogEntry
+import com.example.core.diagnostics.DiagnosticLogger
 import com.example.core.network.LanLinkEngine
 import com.example.core.network.RemoteCommandItem
 import com.example.core.network.RemoteFileEntry
 import com.example.core.security.CryptoIdentityManager
+import com.example.core.security.SafSharedFoldersManager
+import com.example.core.security.SharedSafTree
 import com.example.data.local.ApexDatabase
 import com.example.data.local.DeviceMessageEntity
 import com.example.data.local.DeviceNoteEntity
@@ -26,6 +30,7 @@ import com.example.data.local.PairedDeviceEntity
 import com.example.data.local.TransferRecordEntity
 import com.example.data.repository.ActiveTransferProgress
 import com.example.data.repository.ApexRepository
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -40,13 +45,15 @@ import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.File
 
 enum class ApexDestination {
     HUB,
     REMOTE_FILES,
     DEVICE_SPACE,
-    PLUGINS_TOOLS
+    PLUGINS_TOOLS,
+    SETTINGS
 }
 
 enum class SpaceSubTab {
@@ -76,6 +83,7 @@ data class ApexUiState(
     val localFingerprint: String = "",
     val localIpAddresses: List<String> = emptyList(),
     val activeTcpPort: Int = LanLinkEngine.DEFAULT_KDE_PORT,
+    val activeUdpPort: Int = LanLinkEngine.DEFAULT_KDE_PORT,
     val isScanningLan: Boolean = false
 )
 
@@ -91,7 +99,8 @@ class ApexViewModel(
             localDeviceId = repository.identityManager.localDeviceId,
             localFingerprint = repository.identityManager.localFingerprintFormatted,
             localIpAddresses = repository.getLocalIpAddresses(),
-            activeTcpPort = repository.lanEngine.activeTcpPort
+            activeTcpPort = repository.lanEngine.activeTcpPort,
+            activeUdpPort = repository.lanEngine.activeUdpPort
         )
     )
     val uiState: StateFlow<ApexUiState> = _uiState.asStateFlow()
@@ -121,16 +130,20 @@ class ApexViewModel(
     val activeTransfer: StateFlow<ActiveTransferProgress?> = repository.activeTransfer
     val protocolEvents: StateFlow<List<String>> = repository.protocolEvents
 
+    // Diagnostic Logging & SAF Folder Sharing Streams
+    val diagnosticEntries: StateFlow<List<DiagnosticLogEntry>> = repository.diagnosticLogger.entries
+    val isLoggingEnabled: StateFlow<Boolean> = repository.diagnosticLogger.isLoggingEnabled
+    val isVerbosePacketsEnabled: StateFlow<Boolean> = repository.diagnosticLogger.isVerbosePacketsEnabled
+    val sharedSafTrees: StateFlow<List<SharedSafTree>> = repository.safFoldersManager.sharedTrees
+
     init {
         repository.startEngine()
 
-        // Refresh local bound TCP port & Wi-Fi IPv4 once engine sockets bind
         viewModelScope.launch {
-            delay(350)
+            delay(450)
             refreshLocalNetworkSummary()
         }
 
-        // Auto-select first real discovered/paired peer when none is selected
         viewModelScope.launch {
             devices.collect { list ->
                 val currentId = _uiState.value.selectedDeviceId
@@ -147,7 +160,6 @@ class ApexViewModel(
             }
         }
 
-        // Surface real incoming network events (pair requests, pings, received files)
         viewModelScope.launch {
             repository.incomingAlerts.collect { alert ->
                 _snackbarEvents.tryEmit(alert)
@@ -155,12 +167,13 @@ class ApexViewModel(
         }
     }
 
-    private fun refreshLocalNetworkSummary() {
+    fun refreshLocalNetworkSummary() {
         _uiState.update {
             it.copy(
                 localNodeName = repository.identityManager.localDeviceName,
                 localIpAddresses = repository.getLocalIpAddresses(),
-                activeTcpPort = repository.lanEngine.activeTcpPort
+                activeTcpPort = repository.lanEngine.activeTcpPort,
+                activeUdpPort = repository.lanEngine.activeUdpPort
             )
         }
     }
@@ -177,6 +190,7 @@ class ApexViewModel(
     }
 
     fun selectTab(destination: ApexDestination) {
+        refreshLocalNetworkSummary()
         _uiState.update { it.copy(currentTab = destination) }
         if (destination == ApexDestination.REMOTE_FILES && _uiState.value.selectedDeviceId.isNotBlank()) {
             refreshRemoteDirectory(_uiState.value.currentRemotePath)
@@ -204,6 +218,109 @@ class ApexViewModel(
     }
 
     // =========================================================================
+    // DIAGNOSTIC LOGS & EXPORT ACTIONS
+    // =========================================================================
+
+    fun setDiagnosticLoggingEnabled(enabled: Boolean) {
+        repository.diagnosticLogger.setLoggingEnabled(enabled)
+        _snackbarEvents.tryEmit(if (enabled) "Diagnostic log recording enabled" else "Diagnostic log recording paused")
+    }
+
+    fun setVerbosePacketsEnabled(enabled: Boolean) {
+        repository.diagnosticLogger.setVerbosePacketsEnabled(enabled)
+    }
+
+    fun clearDiagnosticLogs() {
+        repository.diagnosticLogger.clearLogs()
+        _snackbarEvents.tryEmit("Cleared recorded logs")
+    }
+
+    fun buildCurrentDiagnosticReport(): String {
+        refreshLocalNetworkSummary()
+        val state = _uiState.value
+        return repository.diagnosticLogger.buildFullDiagnosticReport(
+            localDeviceName = state.localNodeName,
+            localDeviceId = state.localDeviceId,
+            localFingerprint = state.localFingerprint,
+            localIps = state.localIpAddresses,
+            activeTcpPort = state.activeTcpPort,
+            activeUdpPort = repository.lanEngine.activeUdpPort,
+            multicastHeld = repository.lanEngine.isMulticastLockHeld,
+            sharedFolderNames = sharedSafTrees.value.map { it.alias },
+            devices = devices.value
+        )
+    }
+
+    fun exportDiagnosticLogsToSafUri(destinationUri: Uri) {
+        viewModelScope.launch {
+            val res = withContext(Dispatchers.IO) {
+                val report = buildCurrentDiagnosticReport()
+                repository.diagnosticLogger.exportReportToSafUri(destinationUri, report)
+            }
+            res.fold(
+                onSuccess = { bytes ->
+                    _snackbarEvents.tryEmit("Exported diagnostic log file (${bytes / 1024} KB)")
+                },
+                onFailure = { err ->
+                    _snackbarEvents.tryEmit("Failed to export log file: ${err.message}")
+                }
+            )
+        }
+    }
+
+    fun shareDiagnosticLogsFile(context: Context) {
+        viewModelScope.launch {
+            val intentRes = withContext(Dispatchers.IO) {
+                val report = buildCurrentDiagnosticReport()
+                repository.diagnosticLogger.createShareableReportIntent(report)
+            }
+            intentRes.fold(
+                onSuccess = { shareIntent ->
+                    runCatching {
+                        context.startActivity(
+                            Intent.createChooser(shareIntent, "Export ApexConnect Logs").apply {
+                                addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            }
+                        )
+                    }.onFailure { err ->
+                        _snackbarEvents.tryEmit("Unable to open Share Sheet: ${err.message}")
+                    }
+                },
+                onFailure = { err ->
+                    _snackbarEvents.tryEmit("Failed preparing log file: ${err.message}")
+                }
+            )
+        }
+    }
+
+    fun copyDiagnosticLogsToClipboard() {
+        viewModelScope.launch {
+            val report = withContext(Dispatchers.IO) { buildCurrentDiagnosticReport() }
+            copyToLocalClipboard("ApexConnect Logs", report)
+        }
+    }
+
+    fun getDiagnosticFileSizeBytes(): Long = repository.diagnosticLogger.getLogFileSizeBytes()
+
+    // =========================================================================
+    // SAF SHARED FOLDERS (EXPORT PHONE FOLDERS TO REMOTE PEERS)
+    // =========================================================================
+
+    fun addSharedPhoneFolder(treeUri: Uri) {
+        val added = repository.safFoldersManager.addSharedTreeUri(treeUri)
+        if (added != null) {
+            _snackbarEvents.tryEmit("Shared folder '${added.alias}' with paired devices")
+        } else {
+            _snackbarEvents.tryEmit("Could not share selected folder")
+        }
+    }
+
+    fun removeSharedPhoneFolder(alias: String) {
+        repository.safFoldersManager.removeSharedTree(alias)
+        _snackbarEvents.tryEmit("Stopped sharing '$alias'")
+    }
+
+    // =========================================================================
     // REAL LAN DISCOVERY & PAIRING ACTIONS
     // =========================================================================
 
@@ -217,7 +334,7 @@ class ApexViewModel(
             _uiState.update { it.copy(isScanningLan = false) }
             _snackbarEvents.tryEmit(
                 if (!customIp.isNullOrBlank()) {
-                    "Probing KDE Connect node at ${customIp.trim()}…"
+                    "Probing node at ${customIp.trim()}…"
                 } else if (ok) {
                     "Scanning Wi-Fi network on UDP 1716 & mDNS…"
                 } else {
@@ -260,7 +377,7 @@ class ApexViewModel(
         viewModelScope.launch {
             repository.reconnectDevice(deviceId)
             _snackbarEvents.tryEmit("Refreshing encrypted link…")
-            delay(600)
+            delay(650)
             if (_uiState.value.currentTab == ApexDestination.REMOTE_FILES && _uiState.value.selectedDeviceId == deviceId) {
                 refreshRemoteDirectory(_uiState.value.currentRemotePath)
             }
@@ -268,8 +385,47 @@ class ApexViewModel(
     }
 
     // =========================================================================
-    // FEATURE 1: REMOTE FILE BROWSER ACTIONS
+    // FEATURE 1: REMOTE FILE BROWSER ACTIONS (VFS + KDE SFTP + MANUAL SSH/SFTP)
     // =========================================================================
+
+    fun connectCustomSftp(
+        host: String,
+        port: Int,
+        username: String,
+        password: String,
+        rootPath: String
+    ) {
+        val deviceId = _uiState.value.selectedDeviceId
+        if (deviceId.isBlank()) return
+        viewModelScope.launch {
+            _uiState.update { it.copy(remoteDirectoryState = RemoteDirectoryState.Loading) }
+            val res = repository.configureCustomSftpForPeer(
+                deviceId = deviceId,
+                host = host,
+                port = port,
+                username = username,
+                password = password,
+                rootPath = rootPath
+            )
+            res.fold(
+                onSuccess = { (canonicalPath, items) ->
+                    _uiState.update {
+                        it.copy(
+                            currentRemotePath = canonicalPath,
+                            remoteDirectoryState = RemoteDirectoryState.Loaded(canonicalPath, items)
+                        )
+                    }
+                    _snackbarEvents.tryEmit("Connected to SFTP server")
+                },
+                onFailure = { err ->
+                    _uiState.update {
+                        it.copy(remoteDirectoryState = RemoteDirectoryState.Error("SFTP login failed: ${err.message}"))
+                    }
+                    _snackbarEvents.tryEmit("SFTP failed: ${err.message}")
+                }
+            )
+        }
+    }
 
     fun refreshRemoteDirectory(targetPath: String = _uiState.value.currentRemotePath) {
         val deviceId = _uiState.value.selectedDeviceId
@@ -353,7 +509,7 @@ class ApexViewModel(
             val res = repository.uploadFileToRemoteDirectory(deviceId, targetDir, sourceUri)
             res.fold(
                 onSuccess = {
-                    _snackbarEvents.tryEmit("File sent over TLS")
+                    _snackbarEvents.tryEmit("File transferred successfully")
                     if (_uiState.value.currentTab == ApexDestination.REMOTE_FILES) {
                         refreshRemoteDirectory(targetDir)
                     }
@@ -504,7 +660,7 @@ class ApexViewModel(
         }
 
         if (textToPush.isBlank()) {
-            _snackbarEvents.tryEmit("System clipboard is empty — enter text to push")
+            _snackbarEvents.tryEmit("System clipboard is empty — paste or type text first")
             return
         }
 
@@ -531,6 +687,14 @@ class ApexViewModel(
         }
     }
 
+    fun sendTouchpadScroll(dy: Float) {
+        val deviceId = _uiState.value.selectedDeviceId
+        if (deviceId.isBlank()) return
+        viewModelScope.launch {
+            repository.sendMousepadInput(deviceId, dx = 0f, dy = dy, isScroll = true)
+        }
+    }
+
     fun sendTouchpadClick(rightClick: Boolean = false) {
         val deviceId = _uiState.value.selectedDeviceId
         if (deviceId.isBlank()) return
@@ -553,12 +717,31 @@ class ApexViewModel(
         }
     }
 
+    fun sendRemoteSpecialKey(specialKeyCode: Int, label: String) {
+        val deviceId = _uiState.value.selectedDeviceId
+        if (deviceId.isBlank()) return
+        viewModelScope.launch {
+            repository.sendMousepadInput(deviceId = deviceId, specialKey = specialKeyCode).onSuccess {
+                _snackbarEvents.tryEmit("Sent $label")
+            }
+        }
+    }
+
     fun sendMediaCommand(action: String, volume: Int? = null) {
         val deviceId = _uiState.value.selectedDeviceId
         viewModelScope.launch {
             repository.sendMprisAction(deviceId, action, volume).onFailure {
                 _snackbarEvents.tryEmit(it.message ?: "Media action failed")
             }
+        }
+    }
+
+    fun refreshRemoteTelemetry() {
+        val deviceId = _uiState.value.selectedDeviceId
+        if (deviceId.isBlank()) return
+        viewModelScope.launch {
+            repository.refreshRemoteTelemetry(deviceId)
+            _snackbarEvents.tryEmit("Requested media, battery & shortcuts from peer")
         }
     }
 
@@ -596,7 +779,9 @@ class ApexViewModel(
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
             val db = ApexDatabase.getInstance(application)
             val crypto = CryptoIdentityManager(application)
-            val repo = ApexRepository(application, db, crypto)
+            val diag = DiagnosticLogger.getInstance(application)
+            val saf = SafSharedFoldersManager(application)
+            val repo = ApexRepository(application, db, crypto, diag, saf)
             return ApexViewModel(application, repo) as T
         }
     }

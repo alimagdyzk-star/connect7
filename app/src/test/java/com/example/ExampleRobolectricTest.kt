@@ -1,6 +1,7 @@
 package com.example
 
 import android.content.Context
+import android.net.Uri
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.hasTestTag
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
@@ -8,6 +9,8 @@ import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.performClick
 import androidx.compose.ui.test.performScrollToNode
 import androidx.test.core.app.ApplicationProvider
+import com.example.core.diagnostics.DiagnosticLogger
+import com.example.core.diagnostics.LogCategory
 import com.example.core.protocol.NetworkPacket
 import com.example.core.security.CryptoIdentityManager
 import com.example.data.local.ApexDatabase
@@ -76,7 +79,7 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `clean Apple UI renders live local identity radar on startup and navigates across all tabs`() {
+    fun `clean Apple UI renders live local identity radar and navigates across all 5 tabs including Settings`() {
         composeRule.waitForIdle()
 
         // 1. Verify This Phone card, Active Wi-Fi capsule, and Live Discovery Platter render (no fake mock peers)
@@ -101,7 +104,16 @@ class ExampleRobolectricTest {
         composeRule.onNodeWithTag("device_space_screen").assertIsDisplayed()
         composeRule.onNodeWithTag("space_no_device_card").assertIsDisplayed()
 
-        // 4. Navigate to Controls tab and return to Devices via Open Devices button
+        // 4. Navigate to Settings tab and verify Diagnostic Log Recording & Export controls
+        composeRule.onNodeWithTag("nav_tab_settings").performClick()
+        composeRule.waitForIdle()
+        composeRule.onNodeWithTag("settings_screen").assertIsDisplayed()
+        composeRule.onNodeWithTag("settings_log_toggle").assertIsDisplayed()
+        composeRule.onNodeWithTag("settings_screen")
+            .performScrollToNode(hasTestTag("export_logs_saf_button"))
+        composeRule.onNodeWithTag("export_logs_saf_button").assertIsDisplayed()
+
+        // 5. Navigate to Controls tab and return to Devices via Open Devices button
         composeRule.onNodeWithTag("nav_tab_tools").performClick()
         composeRule.waitForIdle()
         composeRule.onNodeWithTag("plugins_tools_screen").assertIsDisplayed()
@@ -111,7 +123,44 @@ class ExampleRobolectricTest {
     }
 
     @Test
-    fun `NetworkPacket round-trip serialization preserves v8 fields and payloadTransferInfo`() {
+    fun `DiagnosticLogger records events redacts passwords and builds exportable report`() {
+        val logger = DiagnosticLogger.getInstance(context)
+        logger.setLoggingEnabled(true)
+        logger.setVerbosePacketsEnabled(true)
+        logger.info(
+            category = LogCategory.FILES,
+            message = "Received SFTP packet",
+            details = """{"ip":"192.168.1.25","port":1739,"password":"super_secret_sftp_pwd"}"""
+        )
+
+        val report = logger.buildFullDiagnosticReport(
+            localDeviceName = "Phone Alpha",
+            localDeviceId = "node_alpha_123",
+            localFingerprint = "AA:BB:CC:DD",
+            localIps = listOf("192.168.1.10"),
+            activeTcpPort = 1716,
+            activeUdpPort = 1716,
+            multicastHeld = true,
+            sharedFolderNames = listOf("Downloads"),
+            devices = emptyList()
+        )
+
+        assertTrue(report.contains("APEXCONNECT DIAGNOSTIC & PROTOCOL REPORT"))
+        assertTrue(report.contains("Phone Alpha"))
+        assertTrue(report.contains("192.168.1.10"))
+
+        val shareIntent = logger.createShareableReportIntent(report)
+        assertTrue("Expected FileProvider share intent to succeed: ${shareIntent.exceptionOrNull()}", shareIntent.isSuccess)
+
+        val tempExportFile = File(context.cacheDir, "saf_export_verify.txt")
+        val safRes = logger.exportReportToSafUri(Uri.fromFile(tempExportFile), report)
+        assertTrue("Expected SAF URI export to write report: ${safRes.exceptionOrNull()}", safRes.isSuccess)
+        assertTrue(tempExportFile.readText().contains("APEXCONNECT DIAGNOSTIC & PROTOCOL REPORT"))
+    }
+
+    @Test
+    fun `NetworkPacket round-trip serialization preserves v7 protocol compatibility and payloadTransferInfo`() {
+        assertEquals(7, NetworkPacket.PROTOCOL_VERSION)
         val original = NetworkPacket(
             id = 1700000123L,
             type = NetworkPacket.TYPE_SHARE_REQUEST,

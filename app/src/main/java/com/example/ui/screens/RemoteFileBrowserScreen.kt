@@ -29,7 +29,9 @@ import androidx.compose.material.icons.automirrored.filled.InsertDriveFile
 import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.CloudUpload
 import androidx.compose.material.icons.filled.Code
+import androidx.compose.material.icons.filled.CreateNewFolder
 import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.Dns
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.ErrorOutline
 import androidx.compose.material.icons.filled.Folder
@@ -38,14 +40,18 @@ import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Verified
 import androidx.compose.material.icons.filled.WarningAmber
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -59,6 +65,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -93,12 +100,21 @@ fun RemoteFileBrowserScreen(
     onDownloadFileToSaf: (RemoteFileEntry, Uri) -> Unit,
     onDownloadAndOpenFile: (android.content.Context, RemoteFileEntry) -> Unit,
     onUploadFileToCurrentDir: (Uri) -> Unit,
+    onConnectCustomSftp: (host: String, port: Int, username: String, password: String, rootPath: String) -> Unit,
+    onAddSharedPhoneFolder: (Uri) -> Unit,
     onRequestPair: (String) -> Unit,
     onBackToHub: () -> Unit,
     modifier: Modifier = Modifier
 ) {
     val context = LocalContext.current
     var pendingDownloadEntry by remember { mutableStateOf<RemoteFileEntry?>(null) }
+    var showSftpDialog by remember { mutableStateOf(false) }
+
+    var sftpHost by remember(selectedDevice?.ipAddress) { mutableStateOf(selectedDevice?.ipAddress.orEmpty()) }
+    var sftpPort by remember { mutableStateOf("22") }
+    var sftpUser by remember { mutableStateOf("") }
+    var sftpPassword by remember { mutableStateOf("") }
+    var sftpRoot by remember { mutableStateOf("/") }
 
     BackHandler {
         if (currentPath != "/" && currentPath.isNotBlank()) {
@@ -124,6 +140,91 @@ fun RemoteFileBrowserScreen(
         if (sourceUri != null) {
             onUploadFileToCurrentDir(sourceUri)
         }
+    }
+
+    val shareFolderLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocumentTree()
+    ) { treeUri: Uri? ->
+        if (treeUri != null) {
+            onAddSharedPhoneFolder(treeUri)
+        }
+    }
+
+    if (showSftpDialog && selectedDevice != null) {
+        AlertDialog(
+            onDismissRequest = { showSftpDialog = false },
+            title = { Text("Connect via SFTP / SSH") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "Browse ${selectedDevice.deviceName} directly over OpenSSH / SFTP (Linux sshd, macOS Remote Login, or Windows OpenSSH).",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = sftpHost,
+                            onValueChange = { sftpHost = it },
+                            label = { Text("Host / IP") },
+                            singleLine = true,
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.weight(1f)
+                        )
+                        OutlinedTextField(
+                            value = sftpPort,
+                            onValueChange = { sftpPort = it },
+                            label = { Text("Port") },
+                            singleLine = true,
+                            shape = RoundedCornerShape(12.dp),
+                            modifier = Modifier.width(86.dp)
+                        )
+                    }
+                    OutlinedTextField(
+                        value = sftpUser,
+                        onValueChange = { sftpUser = it },
+                        label = { Text("Username") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = sftpPassword,
+                        onValueChange = { sftpPassword = it },
+                        label = { Text("Password") },
+                        visualTransformation = PasswordVisualTransformation(),
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                    OutlinedTextField(
+                        value = sftpRoot,
+                        onValueChange = { sftpRoot = it },
+                        label = { Text("Initial Folder (e.g. / or /home/user)") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val portNum = sftpPort.toIntOrNull() ?: 22
+                        onConnectCustomSftp(sftpHost, portNum, sftpUser, sftpPassword, sftpRoot)
+                        showSftpDialog = false
+                    },
+                    enabled = sftpUser.isNotBlank() && sftpPassword.isNotBlank(),
+                    shape = CircleShape
+                ) {
+                    Text("Connect")
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showSftpDialog = false }) {
+                    Text(stringResource(R.string.action_cancel))
+                }
+            }
+        )
     }
 
     Box(modifier = modifier.fillMaxSize(), contentAlignment = Alignment.TopCenter) {
@@ -168,6 +269,26 @@ fun RemoteFileBrowserScreen(
                         modifier = Modifier
                             .size(36.dp)
                             .clip(CircleShape)
+                            .clickable { shareFolderLauncher.launch(null) }
+                            .testTag("share_local_folder_button")
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Filled.CreateNewFolder,
+                                contentDescription = "Share local folder",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(19.dp)
+                            )
+                        }
+                    }
+
+                    Surface(
+                        shape = CircleShape,
+                        color = MaterialTheme.colorScheme.surface,
+                        shadowElevation = 0.5.dp,
+                        modifier = Modifier
+                            .size(36.dp)
+                            .clip(CircleShape)
                             .clickable(onClick = onRefresh)
                             .testTag("refresh_remote_dir_button")
                     ) {
@@ -181,10 +302,7 @@ fun RemoteFileBrowserScreen(
                         }
                     }
 
-                    if (selectedDevice?.pairState == PairState.PAIRED &&
-                        selectedDevice.isReachable &&
-                        selectedDevice.supportsUploadFs
-                    ) {
+                    if (selectedDevice?.pairState == PairState.PAIRED && selectedDevice.supportsUploadFs) {
                         Surface(
                             shape = CircleShape,
                             color = MaterialTheme.colorScheme.primary,
@@ -215,7 +333,6 @@ fun RemoteFileBrowserScreen(
                 }
             }
 
-            // Clean Finder / iOS Files Path Bar
             FinderPathBar(
                 currentPath = currentPath,
                 canGoUp = currentPath != "/" && currentPath.isNotBlank(),
@@ -263,7 +380,7 @@ fun RemoteFileBrowserScreen(
                             )
                             Spacer(modifier = Modifier.height(12.dp))
                             Text(
-                                text = "Loading folder…",
+                                text = "Connecting to remote folder…",
                                 style = MaterialTheme.typography.bodyMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
@@ -272,23 +389,59 @@ fun RemoteFileBrowserScreen(
                 }
 
                 directoryState is RemoteDirectoryState.Unsupported -> {
-                    AppleFilesStatusPlatter(
-                        icon = Icons.Filled.ErrorOutline,
-                        tint = AppleOrange,
-                        title = "Not Supported on This Device",
-                        body = directoryState.reason
-                    )
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        contentPadding = PaddingValues(bottom = 28.dp),
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        item {
+                            AppleFilesStatusPlatter(
+                                icon = Icons.Filled.Dns,
+                                tint = AppleBlue,
+                                title = "Connect to ${selectedDevice.deviceName} Folders",
+                                body = directoryState.reason,
+                                actionLabel = "Connect via SFTP / SSH",
+                                onAction = { showSftpDialog = true },
+                                secondaryActionLabel = "Send File (KDE Share)",
+                                onSecondaryAction = { uploadPickerLauncher.launch(arrayOf("*/*")) }
+                            )
+                        }
+                        if (recentTransfers.isNotEmpty()) {
+                            item {
+                                RecentTransfersSection(recentTransfers)
+                            }
+                        }
+                    }
                 }
 
                 directoryState is RemoteDirectoryState.Error -> {
-                    AppleFilesStatusPlatter(
-                        icon = Icons.Filled.ErrorOutline,
-                        tint = AppleOrange,
-                        title = "Folder Unavailable",
-                        body = directoryState.message,
-                        actionLabel = "Try Again",
-                        onAction = onRefresh
-                    )
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .weight(1f),
+                        contentPadding = PaddingValues(bottom = 28.dp),
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        item {
+                            AppleFilesStatusPlatter(
+                                icon = Icons.Filled.ErrorOutline,
+                                tint = AppleOrange,
+                                title = "Folder Unavailable",
+                                body = directoryState.message,
+                                actionLabel = "Try Again",
+                                onAction = onRefresh,
+                                secondaryActionLabel = "Connect via SFTP / SSH",
+                                onSecondaryAction = { showSftpDialog = true }
+                            )
+                        }
+                        if (recentTransfers.isNotEmpty()) {
+                            item {
+                                RecentTransfersSection(recentTransfers)
+                            }
+                        }
+                    }
                 }
 
                 directoryState is RemoteDirectoryState.Loaded -> {
@@ -345,17 +498,7 @@ fun RemoteFileBrowserScreen(
 
                         if (recentTransfers.isNotEmpty()) {
                             item {
-                                Column {
-                                    AppleSectionHeader(title = "Recent Transfers")
-                                    AppleGroupedSection {
-                                        recentTransfers.take(5).forEachIndexed { index, rec ->
-                                            AppleTransferLedgerRow(rec)
-                                            if (index < minOf(recentTransfers.size, 5) - 1) {
-                                                AppleInsetDivider()
-                                            }
-                                        }
-                                    }
-                                }
+                                RecentTransfersSection(recentTransfers)
                             }
                         }
                     }
@@ -363,10 +506,30 @@ fun RemoteFileBrowserScreen(
 
                 else -> {
                     Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                        Button(onClick = onRefresh, shape = CircleShape) {
-                            Text("Open Shared Folder")
+                        Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            Button(onClick = onRefresh, shape = CircleShape) {
+                                Text("Open Shared Folder")
+                            }
+                            FilledTonalButton(onClick = { showSftpDialog = true }, shape = CircleShape) {
+                                Text("SFTP Login")
+                            }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun RecentTransfersSection(recentTransfers: List<TransferRecordEntity>) {
+    Column {
+        AppleSectionHeader(title = "Recent Transfers")
+        AppleGroupedSection {
+            recentTransfers.take(5).forEachIndexed { index, rec ->
+                AppleTransferLedgerRow(rec)
+                if (index < minOf(recentTransfers.size, 5) - 1) {
+                    AppleInsetDivider()
                 }
             }
         }
@@ -525,7 +688,7 @@ private fun AppleEmptyFolderPlatter() {
             )
             Spacer(modifier = Modifier.height(4.dp))
             Text(
-                text = "Tap Upload above to send files from your phone directly into this folder.",
+                text = "Tap Upload above to send files from your phone directly into this folder, or tap the folder+ icon to expose a folder from your phone.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center
@@ -541,13 +704,15 @@ private fun AppleFilesStatusPlatter(
     title: String,
     body: String,
     actionLabel: String? = null,
-    onAction: (() -> Unit)? = null
+    onAction: (() -> Unit)? = null,
+    secondaryActionLabel: String? = null,
+    onSecondaryAction: (() -> Unit)? = null
 ) {
     AppleGroupedSection(modifier = Modifier.testTag("files_status_card")) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(28.dp),
+                .padding(26.dp),
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             AppleSquircleIcon(icon = icon, tintColor = tint, sizeDp = 46)
@@ -567,12 +732,26 @@ private fun AppleFilesStatusPlatter(
             )
             if (actionLabel != null && onAction != null) {
                 Spacer(modifier = Modifier.height(16.dp))
-                OutlinedButton(
-                    onClick = onAction,
-                    shape = CircleShape,
-                    modifier = Modifier.testTag("files_status_action_button")
+                Row(
+                    horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text(actionLabel)
+                    Button(
+                        onClick = onAction,
+                        shape = CircleShape,
+                        modifier = Modifier.testTag("files_status_action_button")
+                    ) {
+                        Text(actionLabel)
+                    }
+                    if (secondaryActionLabel != null && onSecondaryAction != null) {
+                        OutlinedButton(
+                            onClick = onSecondaryAction,
+                            shape = CircleShape,
+                            modifier = Modifier.testTag("files_secondary_action_button")
+                        ) {
+                            Text(secondaryActionLabel)
+                        }
+                    }
                 }
             }
         }

@@ -30,6 +30,7 @@ import androidx.compose.material.icons.filled.Mouse
 import androidx.compose.material.icons.filled.MusicNote
 import androidx.compose.material.icons.filled.NotificationsActive
 import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
 import androidx.compose.material.icons.filled.Terminal
@@ -65,7 +66,6 @@ import com.example.ui.components.AppleGroupedSection
 import com.example.ui.components.AppleInsetDivider
 import com.example.ui.components.AppleSectionHeader
 import com.example.ui.components.AppleSquircleIcon
-import com.example.ui.theme.AppleBlue
 import com.example.ui.theme.AppleIndigo
 import com.example.ui.theme.AppleOrange
 import com.example.ui.theme.ApplePink
@@ -77,9 +77,12 @@ fun PluginsToolsScreen(
     selectedDevice: PairedDeviceEntity?,
     remoteCommands: List<RemoteCommandItem>,
     onTouchpadMove: (Float, Float) -> Unit,
+    onTouchpadScroll: (Float) -> Unit,
     onTouchpadClick: (Boolean) -> Unit,
     onSendRemoteKey: (String) -> Unit,
+    onSendRemoteSpecialKey: (Int, String) -> Unit,
     onMediaAction: (String, Int?) -> Unit,
+    onRefreshTelemetry: () -> Unit,
     onPushClipboard: (String?) -> Unit,
     onExecuteCommand: (RemoteCommandItem) -> Unit,
     onRingDevice: () -> Unit,
@@ -107,18 +110,36 @@ fun PluginsToolsScreen(
             verticalArrangement = Arrangement.spacedBy(20.dp)
         ) {
             item {
-                Column {
-                    Text(
-                        text = "Controls",
-                        style = MaterialTheme.typography.displaySmall,
-                        color = MaterialTheme.colorScheme.onBackground
-                    )
-                    Text(
-                        text = selectedDevice?.let { "${it.deviceName} • Remote Continuity" }
-                            ?: "Select a paired device",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "Controls",
+                            style = MaterialTheme.typography.displaySmall,
+                            color = MaterialTheme.colorScheme.onBackground
+                        )
+                        Text(
+                            text = selectedDevice?.let { "${it.deviceName} • Remote Continuity" }
+                                ?: "Select a paired device",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    if (selectedDevice?.pairState == PairState.PAIRED) {
+                        IconButton(
+                            onClick = onRefreshTelemetry,
+                            modifier = Modifier.testTag("refresh_telemetry_button")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Filled.Refresh,
+                                contentDescription = "Refresh players and shortcuts",
+                                tint = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                    }
                 }
             }
 
@@ -217,7 +238,7 @@ fun PluginsToolsScreen(
 
                                 Row(
                                     modifier = Modifier.fillMaxWidth(),
-                                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                                 ) {
                                     OutlinedButton(
                                         onClick = { onTouchpadClick(false) },
@@ -236,6 +257,18 @@ fun PluginsToolsScreen(
                                             .testTag("touchpad_right_click")
                                     ) {
                                         Text(stringResource(R.string.btn_right_click))
+                                    }
+                                    FilledTonalButton(
+                                        onClick = { onTouchpadScroll(-120f) },
+                                        shape = CircleShape
+                                    ) {
+                                        Text("↑")
+                                    }
+                                    FilledTonalButton(
+                                        onClick = { onTouchpadScroll(120f) },
+                                        shape = CircleShape
+                                    ) {
+                                        Text("↓")
                                     }
                                 }
 
@@ -271,6 +304,43 @@ fun PluginsToolsScreen(
                                         )
                                     }
                                 }
+
+                                Spacer(modifier = Modifier.height(10.dp))
+
+                                // KDE Connect Special Keys Row (Backspace=1, Tab=2, Enter=12, Esc=14)
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    FilledTonalButton(
+                                        onClick = { onSendRemoteSpecialKey(14, "Esc") },
+                                        shape = CircleShape,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Text("Esc")
+                                    }
+                                    FilledTonalButton(
+                                        onClick = { onSendRemoteSpecialKey(2, "Tab") },
+                                        shape = CircleShape,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Text("Tab")
+                                    }
+                                    FilledTonalButton(
+                                        onClick = { onSendRemoteSpecialKey(1, "Backspace") },
+                                        shape = CircleShape,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Text("⌫")
+                                    }
+                                    Button(
+                                        onClick = { onSendRemoteSpecialKey(12, "Enter") },
+                                        shape = CircleShape,
+                                        modifier = Modifier.weight(1f)
+                                    ) {
+                                        Text("Enter")
+                                    }
+                                }
                             }
                         }
                     }
@@ -295,7 +365,9 @@ fun PluginsToolsScreen(
                                     Spacer(modifier = Modifier.width(12.dp))
                                     Column {
                                         Text(
-                                            text = selectedDevice.mediaTitle.ifBlank { "Not Playing" },
+                                            text = selectedDevice.mediaTitle.ifBlank {
+                                                selectedDevice.mediaPlayerName.ifBlank { "Ready for Media" }
+                                            },
                                             style = MaterialTheme.typography.titleMedium
                                         )
                                         Text(
